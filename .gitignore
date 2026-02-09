@@ -1,0 +1,55 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# AI 工具配置目录
+.claude/
+.serena/
+.spec-workflow/
+
+# 临时文件和调试脚本
+tmp*
+*.patch
+*.ps1
+*.bat
+
+# 环境变量
+.env
+.env.*
+!.env.example
+
+# 非核心报告文档
+BUGFIX_REPORT.md
+CPU_ACCURACY_TEST.md
+CPU_IMPLEMENTATION_ANALYSIS.md
+CPU_TOOLTIP_FEATURE.md
+CPU_TOOLTIP_VERIFICATION.md
+DELIVERY_REPORT.md
+FINAL_SOLUTION.md
+FINAL_VERIFICATION_GUIDE.md
+OPTIMIZATION_SUMMARY.md
+QUICK_START.md
+QUICK_TEST_GUIDE.md
+TESTING_GUIDE.md
+VERIFICATION_GUIDE.md

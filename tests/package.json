@@ -1,0 +1,17 @@
+{
+  "name": "devenvprobe-tests",
+  "version": "1.0.0",
+  "description": "DevEnvProbe 单元测试套件",
+  "scripts": {
+    "test": "vitest --config vitest.config.ts",
+    "test:unit": "vitest run --config vitest.config.ts unit",
+    "test:coverage": "vitest run --config vitest.config.ts --coverage",
+    "test:watch": "vitest watch --config vitest.config.ts",
+    "test:repeat": "powershell -ExecutionPolicy Bypass -File scripts/repeat-regression.ps1 -Rounds 50"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^1.0.0",
+    "vitest": "^1.0.0",
+    "jsdom": "^23.0.0"
+  }
+}

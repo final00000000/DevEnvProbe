@@ -33,6 +33,9 @@ export interface SystemSnapshot {
   usedMemoryGb: number;
   memoryUsagePercent: number;
   disks: DiskSnapshot[];
+  sampleMode?: "quick" | "precise";
+  sampledAtMs?: number;
+  isStale?: boolean;
 }
 
 export interface SystemRealtimeSnapshot {
@@ -41,6 +44,9 @@ export interface SystemRealtimeSnapshot {
   totalMemoryGb: number;
   usedMemoryGb: number;
   memoryUsagePercent: number;
+  sampleMode?: "quick" | "precise";
+  sampledAtMs?: number;
+  isStale?: boolean;
 }
 
 export interface ToolStatus {

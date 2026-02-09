@@ -470,6 +470,120 @@ body::before {
   background: color-mix(in srgb, var(--color-bg-tertiary) 42%, transparent);
 }
 
+.system-overview-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-bottom: 0.8rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--color-info) 30%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-info) 12%, transparent);
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+}
+
+.system-overview-loading-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 9999px;
+  background: var(--color-info);
+  animation: system-overview-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes system-overview-pulse {
+  0%,
+  100% {
+    transform: scale(0.8);
+    opacity: 0.5;
+  }
+  50% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.docker-skeleton-card {
+  pointer-events: none;
+}
+
+.docker-skeleton-line {
+  position: relative;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--color-bg-tertiary) 88%, transparent);
+}
+
+.docker-skeleton-line::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--color-text-primary) 18%, transparent),
+    transparent
+  );
+  animation: docker-skeleton-shimmer 1.3s linear infinite;
+}
+
+@keyframes docker-skeleton-shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+.docker-skeleton-card .docker-skeleton-line {
+  margin-bottom: 0.62rem;
+}
+
+.docker-skeleton-card .docker-skeleton-line:last-child {
+  margin-bottom: 0;
+}
+
+.docker-skeleton-line-title {
+  width: 45%;
+  height: 12px;
+}
+
+.docker-skeleton-line-value {
+  width: 62%;
+  height: 30px;
+}
+
+.docker-skeleton-line-subtitle {
+  width: 72%;
+  height: 11px;
+}
+
+.docker-panel-skeleton {
+  border: 1px dashed color-mix(in srgb, var(--color-border-light) 72%, transparent);
+  border-radius: 12px;
+  padding: 1rem;
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  background: color-mix(in srgb, var(--color-bg-tertiary) 36%, transparent);
+}
+
+.docker-skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+
+.docker-skeleton-line-wide {
+  height: 16px;
+  flex: 1;
+}
+
+.docker-skeleton-line-short {
+  height: 16px;
+  width: 26%;
+}
+
 .docker-side-panel {
   min-height: 100%;
 }
@@ -751,4 +865,202 @@ body::before {
 
 .cpu-tooltip-content ul li:last-child {
   margin-bottom: 0;
+}
+
+/* Docker 加载状态 */
+.docker-loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 4rem 2rem;
+  min-height: 300px;
+}
+
+.docker-loading-spinner {
+  width: 64px;
+  height: 64px;
+  margin-bottom: 1.5rem;
+}
+
+.docker-spinner-icon {
+  animation: docker-spin 1.2s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+}
+
+.docker-spinner-path {
+  stroke: var(--color-primary);
+  stroke-linecap: round;
+  stroke-dasharray: 80, 200;
+  stroke-dashoffset: 0;
+  animation: docker-dash 1.5s ease-in-out infinite;
+}
+
+@keyframes docker-spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes docker-dash {
+  0% {
+    stroke-dasharray: 1, 200;
+    stroke-dashoffset: 0;
+  }
+  50% {
+    stroke-dasharray: 90, 200;
+    stroke-dashoffset: -35px;
+  }
+  100% {
+    stroke-dasharray: 90, 200;
+    stroke-dashoffset: -125px;
+  }
+}
+
+.docker-loading-text {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin-bottom: 0.5rem;
+}
+
+.docker-loading-hint {
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+}
+
+/* 通用加载状态（避免首页加载时闪烁） */
+.app-loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.65rem;
+  min-height: 220px;
+  text-align: center;
+}
+
+.app-loading-spinner {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 3px solid rgba(45, 212, 191, 0.22);
+  border-top-color: var(--color-primary);
+  animation: app-loading-spin 0.9s linear infinite;
+}
+
+.app-loading-text {
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+
+.app-loading-hint {
+  font-size: 0.8rem;
+}
+
+@keyframes app-loading-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .docker-skeleton-line::after {
+    animation: none;
+  }
+
+  .system-overview-loading-dot {
+    animation: none;
+  }
+
+  .app-loading-spinner {
+    animation: none;
+  }
+}
+
+/* CPU 提示图标 */
+.metric-tooltip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  color: var(--color-info);
+  cursor: help;
+  opacity: 0.7;
+  transition: opacity 0.2s ease;
+}
+
+.metric-tooltip-icon:hover {
+  opacity: 1;
+}
+
+.metric-tooltip-icon:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-info) 70%, transparent);
+  outline-offset: 2px;
+  border-radius: 9999px;
+  opacity: 1;
+}
+
+.cpu-sampling-modal {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 120;
+}
+
+.cpu-sampling-modal.is-open {
+  display: flex;
+}
+
+.cpu-sampling-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgb(5 13 34 / 68%);
+  backdrop-filter: blur(2px);
+}
+
+.cpu-sampling-modal-content {
+  position: relative;
+  width: min(560px, calc(100vw - 2rem));
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--color-border-light) 78%, transparent);
+  background: color-mix(in srgb, var(--color-bg-secondary) 96%, transparent);
+  box-shadow: 0 24px 48px -26px rgb(0 0 0 / 80%);
+  padding: 1rem;
+}
+
+.cpu-sampling-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  margin-bottom: 0.75rem;
+}
+
+.cpu-sampling-modal-close {
+  min-height: 32px;
+  padding: 0.4rem 0.75rem;
+}
+
+.cpu-sampling-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  line-height: 1.55;
+}
+
+.cpu-sampling-modal-body p {
+  margin: 0;
 }

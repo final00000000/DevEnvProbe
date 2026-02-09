@@ -37,6 +37,10 @@ export function formatPercent(value: number, bounded = false): string {
 }
 
 export function formatUptime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return "计算中...";
+  }
+
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
@@ -50,10 +54,14 @@ export function formatUptime(seconds: number): string {
     parts.push(`${hours}小时`);
   }
   if (minutes > 0 || hours > 0 || days > 0) {
-    parts.push(`${minutes}分钟`);
+    parts.push(`${minutes}分`);
   }
-  parts.push(`${secs}秒`);
-  return parts.join(" ");
+
+  if (parts.length === 0) {
+    parts.push(`${secs}秒`);
+  }
+
+  return parts.join("");
 }
 
 export function escapeHtml(raw: string): string {

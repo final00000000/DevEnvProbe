@@ -8,6 +8,12 @@ import type {
   DockerStatItem,
 } from "../types";
 
+const RUNNING_CONTAINER_CACHE_TTL_MS = 3_000;
+
+let cachedRunningContainerIds = new Set<string>();
+let cachedRunningContainerSource: DockerContainerItem[] | null = null;
+let cachedRunningContainerAtMs = 0;
+
 export function createEmptyDockerState(): DockerDashboardState {
   return {
     containers: [],
@@ -133,6 +139,8 @@ export function parseDockerCompose(raw: string): DockerComposeItem[] {
 }
 
 export function filterDockerContainers(items: DockerContainerItem[], filters: DockerFilterState): DockerContainerItem[] {
+  ensureRunningContainerCache(items);
+
   const search = filters.search.trim().toLowerCase();
 
   return items.filter((item) => {
@@ -148,20 +156,45 @@ export function filterDockerContainers(items: DockerContainerItem[], filters: Do
     }
 
     if (filters.status === "running") {
-      return isContainerRunning(item.status);
+      return cachedRunningContainerIds.has(item.id);
     }
 
     if (filters.status === "exited") {
-      return !isContainerRunning(item.status);
+      return !cachedRunningContainerIds.has(item.id);
     }
 
     return true;
   });
 }
 
+export function clearDockerContainerFilterCache(): void {
+  cachedRunningContainerIds.clear();
+  cachedRunningContainerSource = null;
+  cachedRunningContainerAtMs = 0;
+}
+
 export function isContainerRunning(status: string): boolean {
   const normalized = status.toLowerCase();
   return normalized.includes("up") || normalized.includes("running");
+}
+
+function ensureRunningContainerCache(items: DockerContainerItem[]): void {
+  const nowMs = Date.now();
+  const cacheExpired = nowMs - cachedRunningContainerAtMs > RUNNING_CONTAINER_CACHE_TTL_MS;
+
+  if (!cacheExpired && cachedRunningContainerSource === items) {
+    return;
+  }
+
+  cachedRunningContainerIds.clear();
+  items.forEach((item) => {
+    if (isContainerRunning(item.status)) {
+      cachedRunningContainerIds.add(item.id);
+    }
+  });
+
+  cachedRunningContainerSource = items;
+  cachedRunningContainerAtMs = nowMs;
 }
 
 export function firstMeaningfulLine(raw: string): string | null {

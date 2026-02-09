@@ -33,6 +33,11 @@ tmp*
 *.patch
 *.ps1
 *.bat
+*.backup
+nul
+
+# 测试配置
+vitest.config.ts
 
 # 环境变量
 .env

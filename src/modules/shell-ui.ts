@@ -1,5 +1,10 @@
 import { escapeHtml } from "../utils/formatters";
 
+interface LoadingOptions {
+  loadingId?: string;
+  hint?: string;
+}
+
 export function getSettingsContent(): string {
   return `
     <div class="space-y-4">
@@ -87,10 +92,29 @@ export function initRefreshButton(onRefresh: () => Promise<void>): void {
   });
 }
 
-export function showLoading(container: HTMLElement, message: string): void {
+export function showLoading(container: HTMLElement, message: string, options: LoadingOptions = {}): void {
+  const loadingId = options.loadingId ?? "app-loading-panel";
+  const hint = options.hint ?? "";
+  const existing = container.querySelector<HTMLElement>(`#${loadingId}`);
+
+  if (existing) {
+    const textEl = existing.querySelector<HTMLElement>("[data-loading-text]");
+    const hintEl = existing.querySelector<HTMLElement>("[data-loading-hint]");
+    if (textEl) {
+      textEl.textContent = message;
+    }
+    if (hintEl) {
+      hintEl.textContent = hint;
+      hintEl.classList.toggle("hidden", hint.length === 0);
+    }
+    return;
+  }
+
   container.innerHTML = `
-    <div class="card animate-fade-in">
-      <p class="text-text-secondary">${escapeHtml(message)}</p>
+    <div id="${escapeHtml(loadingId)}" class="card animate-fade-in app-loading-state" role="status" aria-live="polite">
+      <div class="app-loading-spinner" aria-hidden="true"></div>
+      <p class="app-loading-text text-text-secondary" data-loading-text>${escapeHtml(message)}</p>
+      <p class="app-loading-hint text-text-muted ${hint.length === 0 ? "hidden" : ""}" data-loading-hint>${escapeHtml(hint)}</p>
     </div>
   `;
 }

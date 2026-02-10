@@ -4,7 +4,6 @@
 
 export { getMetricCard } from "./metric-card";
 export {
-  getDockerActionButton,
   getDockerEmptyState,
   getDockerLoadingState,
   getDockerSummarySkeletonCards,

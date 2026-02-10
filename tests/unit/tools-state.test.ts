@@ -32,7 +32,19 @@ describe('ToolsState', () => {
       expect(state.installingKey).toBeNull();
       expect(state.installLog).toBe('等待安装任务...');
       expect(state.installState).toBe('');
+      expect(state.installProgress).toBe(0);
+      expect(state.installMessage).toBe('待命中');
+      expect(state.installFeedbackLevel).toBe('idle');
+      expect(state.installFeedbackTitle).toBe('');
+      expect(state.installFeedbackDetail).toBe('');
+      expect(state.installProgressTimer).toBeNull();
       expect(state.refreshing).toBe(false);
+      expect(state.lastRefreshError).toBeNull();
+      expect(state.lastRefreshErrorAt).toBe(0);
+      expect(state.refreshFailCount).toBe(0);
+      expect(state.scanStartedAt).toBe(0);
+      expect(state.scanSoftTimeoutActive).toBe(false);
+      expect(state.scanSoftTimeoutMs).toBe(2000);
     });
   });
 
@@ -160,19 +172,22 @@ describe('ToolsState', () => {
     it('应该清除所有定时器', () => {
       state.searchDebounceTimer = window.setTimeout(() => {}, 1000);
       state.autoRefreshTimer = window.setTimeout(() => {}, 2000);
+      state.installProgressTimer = window.setTimeout(() => {}, 3000);
 
       const clearTimeoutSpy = vi.spyOn(window, 'clearTimeout');
 
       state.clearAllTimers();
 
-      expect(clearTimeoutSpy).toHaveBeenCalledTimes(2);
+      expect(clearTimeoutSpy).toHaveBeenCalledTimes(3);
       expect(state.searchDebounceTimer).toBeNull();
       expect(state.autoRefreshTimer).toBeNull();
+      expect(state.installProgressTimer).toBeNull();
     });
 
     it('应该安全处理空定时器', () => {
       state.searchDebounceTimer = null;
       state.autoRefreshTimer = null;
+      state.installProgressTimer = null;
 
       expect(() => state.clearAllTimers()).not.toThrow();
     });

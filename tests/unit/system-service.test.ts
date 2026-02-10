@@ -148,6 +148,25 @@ describe('SystemService', () => {
     expect(service.isSnapshotFresh()).toBe(true);
   });
 
+  it('运行时长 ticker 应按秒边界触发并可停止', () => {
+    const onTick = vi.fn();
+    vi.setSystemTime(new Date('2026-02-10T10:00:00.250Z'));
+
+    service.startUptimeTicker(onTick);
+    vi.advanceTimersByTime(749);
+    expect(onTick).toHaveBeenCalledTimes(0);
+
+    vi.advanceTimersByTime(1);
+    expect(onTick).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(1000);
+    expect(onTick).toHaveBeenCalledTimes(2);
+
+    service.stopUptimeTicker();
+    vi.advanceTimersByTime(2000);
+    expect(onTick).toHaveBeenCalledTimes(2);
+  });
+
 });
 
 // 保持导入变量被使用（避免 noUnusedLocals）

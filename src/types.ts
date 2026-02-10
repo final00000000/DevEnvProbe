@@ -57,6 +57,7 @@ export interface ToolStatus {
   version: string | null;
   details: string | null;
   installKey: string | null;
+  installPath: string | null;
 }
 
 export interface DockerCommandResult {
@@ -120,6 +121,105 @@ export interface DockerFilterState {
 
 export type DockerPanelTab = "containers" | "images" | "stats" | "compose";
 
+export type DockerActionType =
+  | "version"
+  | "info"
+  | "ps"
+  | "images"
+  | "stats"
+  | "system_df"
+  | "compose_ls"
+  | "run"
+  | "start"
+  | "stop"
+  | "restart"
+  | "logs"
+  | "rm"
+  | "rmi";
+
+export type DockerRiskLevel = "safe" | "danger";
+
+export type DockerSelectionKind = "container" | "image" | "stat" | "compose";
+
+export type DeployMode = "compose" | "run";
+
+export type DeployStep = "pull_code" | "stop_old" | "deploy_new";
+
+export type RunParamMode = "form" | "template";
+
+export type DeployRunImageSource = "pull" | "build";
+
+export type DeployStepStatus = "pending" | "running" | "success" | "failed" | "skipped";
+
+export interface DeployGitConfig {
+  enabled: boolean;
+  remote: string;
+}
+
+export interface DeployComposeConfig {
+  projectPath: string;
+  composeFile: string;
+  service: string;
+}
+
+export interface DeployRunConfig {
+  paramMode: RunParamMode;
+  containerName: string;
+  imageRef: string;
+  imageSource: DeployRunImageSource;
+  buildContext: string;
+  dockerfile: string;
+  imageTag: string;
+  portsText: string;
+  envText: string;
+  volumesText: string;
+  restartPolicy: string;
+  extraArgs: string;
+  templateArgs: string;
+}
+
+export interface DeployProfile {
+  id: string;
+  name: string;
+  mode: DeployMode;
+  git: DeployGitConfig;
+  compose: DeployComposeConfig;
+  run: DeployRunConfig;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DeployStepRequest {
+  profile: DeployProfile;
+  step: DeployStep;
+  selectedBranch: string | null;
+}
+
+export interface DeployStepResult {
+  step: DeployStep;
+  ok: boolean;
+  skipped: boolean;
+  commands: string[];
+  output: string;
+  error: string | null;
+  elapsedMs: number;
+}
+
+export interface DeployPipelineStepState {
+  step: DeployStep;
+  status: DeployStepStatus;
+  message: string;
+}
+
+export interface DeployPipelineState {
+  running: boolean;
+  lastRunAt: number;
+  lastError: string | null;
+  summary: string;
+  steps: DeployPipelineStepState[];
+  logs: DeployStepResult[];
+}
+
 export interface DockerDashboardState {
   containers: DockerContainerItem[];
   images: DockerImageItem[];
@@ -142,6 +242,17 @@ export interface InstallResult {
   stderr: string;
   exitCode: number;
 }
+
+export interface UninstallResult {
+  itemKey: string;
+  packageId: string;
+  command: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+export type InstallFeedbackLevel = "idle" | "running" | "success" | "error";
 
 export interface ToolFilterState {
   search: string;

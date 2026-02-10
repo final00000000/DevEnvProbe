@@ -1,4 +1,5 @@
 import { escapeHtml } from "../utils/formatters";
+import { renderThemeSettingsPanel } from "./theme/theme-settings";
 
 interface LoadingOptions {
   loadingId?: string;
@@ -8,10 +9,13 @@ interface LoadingOptions {
 export function getSettingsContent(): string {
   return `
     <div class="space-y-4">
+      ${renderThemeSettingsPanel()}
+
       <div class="card animate-fade-in">
-        <h3 class="text-lg font-semibold text-text-primary mb-4">显示与主题</h3>
+        <h3 class="text-lg font-semibold text-text-primary mb-4">主题说明</h3>
         <div class="space-y-3 text-sm text-text-secondary">
-          <p>已支持深色 / 浅色模式切换，并自动记住上次选择。</p>
+          <p>主题切换统一在此页面完成，不再区分深色 / 浅色模式。</p>
+          <p>当前内置 GitHub、Vercel、Linear、Arc、Notion、白昼简约 六套主题。</p>
           <p>字体已优化为中文友好字体栈，修复中文信息偶发乱码显示问题。</p>
           <p>命令执行统一后台静默，无额外 shell 弹窗。</p>
         </div>
@@ -21,61 +25,12 @@ export function getSettingsContent(): string {
         <h3 class="text-lg font-semibold text-text-primary mb-4">安装偏好</h3>
         <div class="space-y-2 text-sm text-text-secondary">
           <p>环境市场安装默认使用 winget。</p>
-          <p>支持手动输入或点击“选择目录”挑选安装路径。</p>
+          <p>支持手动输入或点击"选择目录"挑选安装路径。</p>
           <p>安装路径示例：<span class="text-text-primary">D:/DevTools</span></p>
         </div>
       </div>
     </div>
   `;
-}
-
-export function bindSettingsActions(): void {
-  // 当前设置页暂无交互控件，保留扩展点
-}
-
-function persistTheme(theme: "light" | "dark"): void {
-  localStorage.setItem("dev-env-probe-theme", theme);
-}
-
-function syncThemeButton(): void {
-  const isLight = document.documentElement.classList.contains("light");
-  const iconDark = document.getElementById("theme-icon-dark");
-  const iconLight = document.getElementById("theme-icon-light");
-  const text = document.getElementById("theme-text");
-
-  if (isLight) {
-    iconDark?.classList.add("hidden");
-    iconLight?.classList.remove("hidden");
-    if (text) {
-      text.textContent = "深色模式";
-    }
-  } else {
-    iconDark?.classList.remove("hidden");
-    iconLight?.classList.add("hidden");
-    if (text) {
-      text.textContent = "浅色模式";
-    }
-  }
-}
-
-export function initThemeToggle(): void {
-  const toggleBtn = document.getElementById("theme-toggle");
-  toggleBtn?.addEventListener("click", () => {
-    const html = document.documentElement;
-    const willLight = !html.classList.contains("light");
-    html.classList.toggle("light", willLight);
-    persistTheme(willLight ? "light" : "dark");
-    syncThemeButton();
-  });
-  syncThemeButton();
-}
-
-export function loadThemePreference(): void {
-  const saved = localStorage.getItem("dev-env-probe-theme");
-  if (saved === "light") {
-    document.documentElement.classList.add("light");
-  }
-  syncThemeButton();
 }
 
 export function initRefreshButton(onRefresh: () => Promise<void>): void {
@@ -146,4 +101,60 @@ export function ensureShellRuntimeStyles(): void {
 }
 `;
   document.head.appendChild(style);
+}
+
+type NoticeLevel = "info" | "success" | "error";
+
+let noticeTimer: number | null = null;
+
+function ensureGlobalNoticeHost(): HTMLElement {
+  const existing = document.getElementById("global-notice-host");
+  if (existing) {
+    return existing;
+  }
+
+  const host = document.createElement("div");
+  host.id = "global-notice-host";
+  host.className = "global-notice-host";
+  host.setAttribute("aria-live", "polite");
+  host.setAttribute("aria-atomic", "true");
+  document.body.appendChild(host);
+  return host;
+}
+
+export function showGlobalNotice(
+  title: string,
+  detail: string,
+  level: NoticeLevel = "info",
+  durationMs = 4200
+): void {
+  const host = ensureGlobalNoticeHost();
+  host.innerHTML = `
+    <div class="global-notice is-${escapeHtml(level)}" role="alert">
+      <div class="global-notice-content">
+        <div class="global-notice-title">${escapeHtml(title)}</div>
+        <div class="global-notice-detail">${escapeHtml(detail)}</div>
+      </div>
+      <button type="button" class="global-notice-close" aria-label="关闭提示">×</button>
+    </div>
+  `;
+
+  const closeBtn = host.querySelector<HTMLButtonElement>(".global-notice-close");
+  closeBtn?.addEventListener("click", () => {
+    host.innerHTML = "";
+    if (noticeTimer !== null) {
+      window.clearTimeout(noticeTimer);
+      noticeTimer = null;
+    }
+  });
+
+  if (noticeTimer !== null) {
+    window.clearTimeout(noticeTimer);
+    noticeTimer = null;
+  }
+
+  noticeTimer = window.setTimeout(() => {
+    host.innerHTML = "";
+    noticeTimer = null;
+  }, durationMs);
 }

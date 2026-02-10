@@ -78,4 +78,37 @@ describe('DockerService', () => {
     expect(dockerState.status).toBe('概览刷新失败');
     expect(dockerState.output).toContain('docker daemon unavailable');
   });
+
+  it('应支持 rm/rmi 动作透传', async () => {
+    (invoke as any).mockResolvedValue({
+      ok: true,
+      data: {
+        action: 'rm',
+        command: 'docker rm redis',
+        stdout: '',
+        stderr: '',
+        exitCode: 0,
+      },
+      error: null,
+      elapsedMs: 30,
+    });
+
+    await service.runDockerAction('rm', 'redis');
+    expect(invoke).toHaveBeenLastCalledWith('run_docker_action', {
+      action: 'rm',
+      target: 'redis',
+    });
+
+    await service.runDockerAction('rmi', 'sha256abc123');
+    expect(invoke).toHaveBeenLastCalledWith('run_docker_action', {
+      action: 'rmi',
+      target: 'sha256abc123',
+    });
+
+    await service.runDockerAction('run', 'sha256abc123');
+    expect(invoke).toHaveBeenLastCalledWith('run_docker_action', {
+      action: 'run',
+      target: 'sha256abc123',
+    });
+  });
 });

@@ -57,9 +57,7 @@ export function formatUptime(seconds: number): string {
     parts.push(`${minutes}分`);
   }
 
-  if (parts.length === 0) {
-    parts.push(`${secs}秒`);
-  }
+  parts.push(`${secs}秒`);
 
   return parts.join("");
 }

@@ -11,7 +11,7 @@ export const pages: Record<PageKey, PageConfig> = {
   },
   docker: {
     title: "Docker",
-    subtitle: "保留现有命令并优化交互体验",
+    subtitle: "双栏工作台化操作中心，容器运维优先",
   },
   settings: {
     title: "设置",
@@ -180,4 +180,45 @@ export const marketMetaMap: Record<string, MarketMeta> = {
     downloads: "1亿+",
     type: "IDE",
   },
+  // ── AI ──
+  "claude-code": {
+    title: "Claude Code",
+    description: "Anthropic AI 编程助手 CLI，支持代码生成与对话式开发。",
+    tags: ["#ai", "#coding"],
+    hot: "9200",
+    downloads: "--",
+    type: "AI",
+  },
+  "codex-cli": {
+    title: "Codex CLI",
+    description: "OpenAI AI 编程助手 CLI，支持终端内智能编码。",
+    tags: ["#ai", "#coding"],
+    hot: "8500",
+    downloads: "--",
+    type: "AI",
+  },
+  "gemini-cli": {
+    title: "Gemini CLI",
+    description: "Google AI 编程助手 CLI，支持多模态代码辅助。",
+    tags: ["#ai", "#coding"],
+    hot: "7800",
+    downloads: "--",
+    type: "AI",
+  },
+};
+
+/** installKey -> npm 包名映射，用于动态获取下载量 */
+export const npmPackageMap: Record<string, string> = {
+  "nodejs-lts": "node",
+  pnpm: "pnpm",
+  yarn: "yarn",
+  bun: "bun",
+  deno: "deno",
+  typescript: "typescript",
+  pipx: "pipx",
+  uv: "uv",
+  // ── AI ──
+  "claude-code": "@anthropic-ai/claude-code",
+  "codex-cli": "@openai/codex",
+  "gemini-cli": "@google/gemini-cli",
 };

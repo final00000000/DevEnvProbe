@@ -1,590 +1,745 @@
-/**
- * Docker 页面渲染模块
- */
-
-import { dockerState, appState } from "../state";
-import { dockerService } from "../services";
+import { appState, deployState, dockerState } from "../state";
+import { deployService, dockerService } from "../services";
+import { getDockerEmptyState, getDockerLoadingState, getDockerPanelSkeleton, getDockerSummarySkeletonCards, getMetricCard } from "../ui";
 import {
-  getDockerActionButton,
-  getDockerEmptyState,
-  getDockerLoadingState,
-  getDockerPanelSkeleton,
-  getDockerSummarySkeletonCards,
-  getMetricCard,
-} from "../ui";
-import { filterDockerContainers, isContainerRunning } from "../modules/docker-data";
-import { escapeHtml, formatPercent, getBadgeClassByUsage, getProgressColorClass } from "../utils/formatters";
-import { DOCKER_SEARCH_DEBOUNCE_MS } from "../constants/config";
+  DANGER_DOCKER_ACTIONS,
+  SAFE_DOCKER_ACTIONS,
+  findSelectionEntry,
+  getDockerActionLabel,
+  getDockerActionMeta,
+  getSelectionEntries,
+  loadDockerAdvancedMode,
+  normalizeWorkbenchSelection,
+  renderDockerOutputDrawer,
+  resolveActionTarget,
+  resolveDockerActionState,
+  saveDockerAdvancedMode,
+  shouldAutoOpenDockerOutputDrawer,
+} from "../modules/docker-workbench";
+import {
+  DeployOrchestrator,
+  renderDeployPipelineCard,
+  resolveGitProjectPath,
+  validateProfileForExecution,
+} from "../modules/deploy";
+import { isContainerRunning } from "../modules/docker-data";
 import { debounce } from "../utils/debounce";
+import { escapeHtml, formatPercent, getBadgeClassByUsage } from "../utils/formatters";
 import { MemoryMonitor } from "../utils/memory-monitor";
-import type { DockerPanelTab } from "../types";
+import { DOCKER_INIT_DELAY_MS, DOCKER_SEARCH_DEBOUNCE_MS } from "../constants/config";
+import { showGlobalNotice } from "../modules/shell-ui";
+import type { DeployProfile, DockerActionType, DockerPanelTab, DockerSelectionKind } from "../types";
 import type { DockerOverviewMode } from "../services/docker-service";
 
-interface ManagedListenerEntry {
+interface ManagedListener {
   element: Element;
   event: string;
   handler: EventListener;
 }
 
-/**
- * Docker 页面渲染类
- */
+const TAB_LABEL: Record<DockerSelectionKind, string> = {
+  container: "容器对象",
+  image: "镜像对象",
+  stat: "资源对象",
+  compose: "Compose 对象",
+};
+
+const TAB_EMPTY: Record<DockerPanelTab, string> = {
+  containers: "未匹配到容器，请调整筛选或刷新概览。",
+  images: "未匹配到镜像，请调整筛选或刷新概览。",
+  stats: "未匹配到资源数据，请执行资源监控后重试。",
+  compose: "未匹配到 Compose 项目，请刷新概览。",
+};
+
 export class DockerPage {
   private summaryCardsCache: string | null = null;
-
   private lastSummaryFingerprint: string | null = null;
-
-  private pageListeners: ManagedListenerEntry[] = [];
-
-  private rowListeners: ManagedListenerEntry[] = [];
-
+  private lastDeployFingerprint: string | null = null;
+  private pageListeners: ManagedListener[] = [];
   private memoryMonitorTimer: number | null = null;
-
   private panelUpdateRafId: number | null = null;
+  private readonly debouncedUpdatePanel = debounce(() => this.requestPanelSectionUpdate(), DOCKER_SEARCH_DEBOUNCE_MS);
+  private readonly deployOrchestrator = new DeployOrchestrator({
+    executeStep: async (profile, step, selectedBranch) =>
+      deployService.executeDeployStep({
+        profile,
+        step,
+        selectedBranch: selectedBranch.trim().length > 0 ? selectedBranch : null,
+      }),
+  });
 
-  private readonly debouncedUpdatePanel = debounce(() => {
-    this.requestPanelSectionUpdate();
-  }, DOCKER_SEARCH_DEBOUNCE_MS);
-
-  /**
-   * 渲染 Docker 页面
-   */
   async render(container: HTMLElement, renderEpoch?: number): Promise<void> {
-    if (renderEpoch !== undefined && appState.isRenderStale(renderEpoch, "docker")) {
-      return;
-    }
+    if (renderEpoch !== undefined && appState.isRenderStale(renderEpoch, "docker")) return;
 
-    const hasNoData = !this.hasOverviewData();
-    const showBootstrapSkeleton = this.shouldRenderBootstrapSkeleton();
-    const summaryDisplay = this.getSummaryDisplayValues();
+    this.clearExpiredDangerConfirm();
+    if (!dockerState.bootstrapped) dockerState.advancedModeEnabled = loadDockerAdvancedMode();
+    this.syncSelection();
+
+    const showSkeleton = this.shouldRenderBootstrapSkeleton();
+    const pendingText = dockerState.pendingAction ? `执行中: ${dockerState.pendingAction}` : dockerState.status;
     const lastCommand = dockerState.dashboard.lastCommand || "尚未执行";
-    const pendingText = dockerState.pendingAction ? `执行中: ${dockerState.pendingAction}` : "空闲";
-    const infoLine = dockerState.dashboard.infoText || "未获取 docker info";
-    const versionLine = dockerState.dashboard.versionText || "未获取 docker version";
+    const versionLine = dockerState.dashboard.versionText || "未获取";
 
     container.innerHTML = `
-    <div class="space-y-4 docker-page">
-      <div id="docker-summary-grid" class="grid grid-cols-5 gap-3">
-        ${showBootstrapSkeleton ? getDockerSummarySkeletonCards() : this.renderSummaryCards()}
-      </div>
-
-      <div class="grid grid-cols-4 gap-4">
-        <div class="card col-span-3 animate-fade-in">
-          <h3 class="text-lg font-semibold text-text-primary mb-3">Docker 操作中心</h3>
-
-          <div class="docker-toolbar mb-3">
-            ${getDockerActionButton("version", "版本", { pendingAction: dockerState.pendingAction })}
-            ${getDockerActionButton("info", "信息", { pendingAction: dockerState.pendingAction })}
-            ${getDockerActionButton("ps", "容器列表", { pendingAction: dockerState.pendingAction })}
-            ${getDockerActionButton("images", "镜像列表", { pendingAction: dockerState.pendingAction })}
-            ${getDockerActionButton("stats", "资源统计", { pendingAction: dockerState.pendingAction })}
-            ${getDockerActionButton("system_df", "磁盘占用", { pendingAction: dockerState.pendingAction })}
-            ${getDockerActionButton("compose_ls", "Compose 项目", { pendingAction: dockerState.pendingAction })}
-          </div>
-
-          <div class="docker-input-group mb-3">
-            <label class="text-sm text-text-secondary">容器名称 / ID</label>
-            <div class="docker-target-row mt-2">
-              <input id="docker-target" class="input flex-1" placeholder="例如: redis-dev" value="${escapeHtml(dockerState.target)}" />
-              ${getDockerActionButton("start", "启动", { pendingAction: dockerState.pendingAction })}
-              ${getDockerActionButton("stop", "停止", { pendingAction: dockerState.pendingAction })}
-              ${getDockerActionButton("restart", "重启", { pendingAction: dockerState.pendingAction })}
-              ${getDockerActionButton("logs", "日志", { pendingAction: dockerState.pendingAction })}
+      <div class="space-y-4 docker-page docker-workbench">
+        <div id="docker-summary-grid" class="grid grid-cols-5 gap-3">${showSkeleton ? getDockerSummarySkeletonCards() : this.renderSummaryCards()}</div>
+        <div class="card animate-fade-in docker-workbench-shell">
+          <div class="docker-workbench-head">
+            <div class="docker-workbench-status">
+              <span id="docker-status" class="badge badge-info">${escapeHtml(pendingText)}</span>
+              <span class="docker-workbench-meta-item">最后命令：<code id="docker-last-command" class="docker-status-cmd">${escapeHtml(lastCommand)}</code></span>
+              <span class="docker-workbench-meta-item">Docker：<span id="docker-version-line">${escapeHtml(versionLine)}</span></span>
+              <span class="docker-workbench-meta-item">概览刷新：<span id="docker-overview-time">${escapeHtml(this.formatOverviewRefreshedTime())}</span></span>
+            </div>
+            <div class="docker-workbench-head-actions">
+              <button class="btn btn-secondary btn-xs" data-docker-refresh-overview ${dockerState.pendingAction ? "disabled" : ""}>刷新概览</button>
+              <button class="btn btn-secondary btn-xs" data-docker-output-toggle>${dockerState.outputDrawerOpen ? "收起输出" : "查看输出"}</button>
+              <label class="docker-workbench-advanced-switch" title="开启后显示删除容器/镜像等危险操作">
+                <input id="docker-advanced-mode" type="checkbox" ${dockerState.advancedModeEnabled ? "checked" : ""} />
+                <span>高级模式</span>
+              </label>
             </div>
           </div>
-
-          <div class="docker-panel-tools mb-3">
-            <div class="docker-tabs">
-              <button class="docker-tab ${dockerState.activeTab === "containers" ? "active" : ""}" data-docker-tab="containers">容器</button>
-              <button class="docker-tab ${dockerState.activeTab === "images" ? "active" : ""}" data-docker-tab="images">镜像</button>
-              <button class="docker-tab ${dockerState.activeTab === "stats" ? "active" : ""}" data-docker-tab="stats">资源监控</button>
-              <button class="docker-tab ${dockerState.activeTab === "compose" ? "active" : ""}" data-docker-tab="compose">Compose</button>
-            </div>
-
-            <div class="docker-filters">
-              <input id="docker-search" class="input" placeholder="筛选容器/镜像/服务..." value="${escapeHtml(dockerState.filters.search)}" />
-              <select id="docker-status-filter" class="select">
-                <option value="all" ${dockerState.filters.status === "all" ? "selected" : ""}>全部状态</option>
-                <option value="running" ${dockerState.filters.status === "running" ? "selected" : ""}>仅运行中</option>
-                <option value="exited" ${dockerState.filters.status === "exited" ? "selected" : ""}>仅已停止</option>
-              </select>
-              <button id="docker-refresh-overview" class="btn btn-secondary" ${dockerState.pendingAction ? "disabled" : ""}>刷新概览</button>
-            </div>
-          </div>
-
-          <div id="docker-structured-panel">
-            ${showBootstrapSkeleton ? getDockerPanelSkeleton() : this.renderStructuredPanel()}
-          </div>
-
-          <details class="docker-raw-panel">
-            <summary>原始命令输出（调试）</summary>
-            <div id="docker-output" class="docker-output custom-scrollbar">${escapeHtml(dockerState.output)}</div>
-          </details>
-        </div>
-
-        <div class="card animate-fade-in docker-side-panel">
-          <h3 class="text-lg font-semibold text-text-primary mb-3">执行状态</h3>
-          <div class="space-y-3 text-sm text-text-secondary">
-            <div class="docker-side-meta">
-              <span>状态</span>
-              <span id="docker-status" class="badge badge-info">${escapeHtml(dockerState.status)}</span>
-            </div>
-            <div class="docker-side-meta">
-              <span>任务</span>
-              <span id="docker-pending" class="text-text-primary">${escapeHtml(pendingText)}</span>
-            </div>
-            <div class="docker-side-meta">
-              <span>最后命令</span>
-            </div>
-            <code id="docker-last-command" class="docker-last-command">${escapeHtml(lastCommand)}</code>
-
-            <div class="docker-split"></div>
-
-            <div class="docker-side-meta">
-              <span>版本</span>
-              <span id="docker-version-line" class="text-text-primary">${escapeHtml(versionLine)}</span>
-            </div>
-            <div class="docker-side-meta">
-              <span>信息</span>
-              <span id="docker-info-line" class="text-text-primary">${escapeHtml(infoLine)}</span>
-            </div>
-
-            <div class="docker-split"></div>
-
-            <div class="docker-side-meta">
-              <span>Compose 项目</span>
-              <span id="docker-compose-count" class="docker-highlight">${summaryDisplay.composeCount}</span>
-            </div>
-            <div class="docker-side-meta">
-              <span>平均 CPU</span>
-              <span id="docker-avg-cpu" class="docker-highlight">${summaryDisplay.avgCpu}</span>
-            </div>
-            <div class="docker-side-meta">
-              <span>网络接收</span>
-              <span id="docker-net-rx" class="docker-highlight">${escapeHtml(summaryDisplay.netRx)}</span>
-            </div>
-            <div class="docker-side-meta">
-              <span>网络发送</span>
-              <span id="docker-net-tx" class="docker-highlight">${escapeHtml(summaryDisplay.netTx)}</span>
-            </div>
-
-            <div class="text-xs text-text-muted">结构化表格用于日常查看，原始输出保留在折叠面板便于排错。</div>
+          <div class="docker-workbench-body">
+            <section class="docker-workbench-left">
+              <div class="docker-tabs mb-3">
+                <button class="docker-tab ${dockerState.activeTab === "containers" ? "active" : ""}" data-docker-tab="containers">容器</button>
+                <button class="docker-tab ${dockerState.activeTab === "images" ? "active" : ""}" data-docker-tab="images">镜像</button>
+                <button class="docker-tab ${dockerState.activeTab === "stats" ? "active" : ""}" data-docker-tab="stats">资源监控</button>
+                <button class="docker-tab ${dockerState.activeTab === "compose" ? "active" : ""}" data-docker-tab="compose">Compose</button>
+              </div>
+              <div class="docker-filters-row mb-3">
+                <input id="docker-search" class="input flex-1" placeholder="搜索容器、镜像、项目..." value="${escapeHtml(dockerState.filters.search)}" />
+                <div id="docker-status-filter-group" class="docker-workbench-status-group" style="${dockerState.activeTab === "containers" ? "" : "display:none"}">
+                  <button type="button" class="docker-workbench-status-chip ${dockerState.filters.status === "all" ? "active" : ""}" data-docker-status-filter="all">全部状态</button>
+                  <button type="button" class="docker-workbench-status-chip ${dockerState.filters.status === "running" ? "active" : ""}" data-docker-status-filter="running">运行中</button>
+                  <button type="button" class="docker-workbench-status-chip ${dockerState.filters.status === "exited" ? "active" : ""}" data-docker-status-filter="exited">已停止</button>
+                </div>
+              </div>
+              <div id="docker-workbench-left-list" class="docker-workbench-left-list custom-scrollbar">${this.renderList(showSkeleton)}</div>
+            </section>
+            <section id="docker-workbench-right-panel" class="docker-workbench-right">${this.renderDetail(showSkeleton)}</section>
           </div>
         </div>
+        <div id="deploy-pipeline-host">${this.renderDeployPanel()}</div>
+        <div id="docker-output-drawer-host">${renderDockerOutputDrawer({ open: dockerState.outputDrawerOpen, status: dockerState.status, output: dockerState.output, lastCommand })}</div>
       </div>
-    </div>
-  `;
+    `;
 
-    if (renderEpoch !== undefined && appState.isRenderStale(renderEpoch, "docker")) {
-      return;
-    }
+    this.lastDeployFingerprint = this.buildDeployFingerprint();
 
+    if (renderEpoch !== undefined && appState.isRenderStale(renderEpoch, "docker")) return;
     this.bindDockerActions();
     dockerState.panelNeedsRefresh = false;
 
-    // 首次进入或数据为空时自动刷新
-    if (!dockerState.bootstrapped || hasNoData) {
+    if (!deployState.branchesLoading && deployState.availableBranches.length === 0 && deployState.activeProfile?.git.enabled) {
+      void this.refreshDeployBranches();
+    }
+
+    if (!dockerState.bootstrapped) {
       dockerState.bootstrapped = true;
-      setTimeout(() => {
-        void this.refreshOverviewWithUiSync("quick");
-      }, 100);
+      window.setTimeout(() => void this.refreshOverviewWithUiSync("quick"), DOCKER_INIT_DELAY_MS);
     }
 
-    if (import.meta.env.DEV) {
-      MemoryMonitor.getInstance().checkMemoryThreshold(80, "After DockerPage render");
-    }
-
+    if (import.meta.env.DEV) MemoryMonitor.getInstance().checkMemoryThreshold(80, "After DockerPage render");
     this.startMemoryMonitoring();
   }
 
-  /**
-   * 渲染摘要卡片
-   */
   renderSummaryCards(): string {
-    const summary = dockerState.dashboard.summary;
-    const summaryFingerprint = this.buildSummaryFingerprint();
-
-    if (this.summaryCardsCache !== null && this.lastSummaryFingerprint === summaryFingerprint) {
-      return this.summaryCardsCache;
-    }
+    const s = dockerState.dashboard.summary;
+    const fp = `${s.totalContainers}|${s.runningContainers}|${s.totalImages}|${s.totalCpuPercent}|${s.memUsageText}|${s.totalMemUsagePercent ?? "none"}|${dockerState.lastOverviewAt}|${dockerState.pendingAction ?? "idle"}`;
+    if (this.summaryCardsCache && this.lastSummaryFingerprint === fp) return this.summaryCardsCache;
 
     const cards = dockerState.lastOverviewAt === 0
-      ? this.renderSummaryPlaceholderCards(this.isOverviewLoading())
-      : getMetricCard("容器总数", String(summary.totalContainers), "包含运行中与停止实例", "") +
-        getMetricCard("运行中", String(summary.runningContainers), "当前处于 Up 状态", "metric-trend-up") +
-        getMetricCard("镜像数", String(summary.totalImages), "本地镜像存量", "") +
-        getMetricCard("CPU 总占用", formatPercent(summary.totalCpuPercent), "容器资源总览", "") +
-        getMetricCard(
-          "内存占用",
-          summary.memUsageText,
-          summary.totalMemUsagePercent === null ? "执行 stats 后可见" : `占比 ${formatPercent(summary.totalMemUsagePercent)}`,
-          ""
-        );
+      ? this.renderSummaryPlaceholders(this.isOverviewLoading())
+      : getMetricCard("容器总数", String(s.totalContainers), "包含运行中与停止实例", "")
+        + getMetricCard("运行中", String(s.runningContainers), "当前处于 Up 状态", "metric-trend-up")
+        + getMetricCard("镜像数", String(s.totalImages), "本地镜像存量", "")
+        + getMetricCard("CPU 总占用", formatPercent(s.totalCpuPercent), "容器资源总览", "")
+        + getMetricCard("内存占用", s.memUsageText, s.totalMemUsagePercent === null ? "执行 stats 后可见" : `占比 ${formatPercent(s.totalMemUsagePercent)}`, "");
 
     this.summaryCardsCache = cards;
-    this.lastSummaryFingerprint = summaryFingerprint;
+    this.lastSummaryFingerprint = fp;
     return cards;
   }
 
-  private buildSummaryFingerprint(): string {
-    const summary = dockerState.dashboard.summary;
-    return `${summary.totalContainers}|${summary.runningContainers}|${summary.totalImages}|${summary.totalCpuPercent}|${summary.memUsageText}|${summary.totalMemUsagePercent ?? "none"}|${dockerState.lastOverviewAt}|${dockerState.pendingAction ?? "idle"}`;
+  private renderSummaryPlaceholders(isLoading: boolean): string {
+    const subtitle = isLoading ? "正在获取概览..." : "等待首次概览完成";
+    return getMetricCard("容器总数", "--", subtitle, "")
+      + getMetricCard("运行中", "--", subtitle, "")
+      + getMetricCard("镜像数", "--", subtitle, "")
+      + getMetricCard("CPU 总占用", "--", subtitle, "")
+      + getMetricCard("内存占用", "待统计", subtitle, "");
   }
 
-  private renderSummaryPlaceholderCards(isLoading: boolean): string {
-    const subtitle = isLoading ? "正在获取概览..." : "等待首次概览完成";
-    return (
-      getMetricCard("容器总数", "--", subtitle, "") +
-      getMetricCard("运行中", "--", subtitle, "") +
-      getMetricCard("镜像数", "--", subtitle, "") +
-      getMetricCard("CPU 总占用", "--", subtitle, "") +
-      getMetricCard("内存占用", "待统计", subtitle, "")
+  private renderDeployPanel(): string {
+    return renderDeployPipelineCard(
+      deployState.profiles,
+      deployState.selectedProfileId,
+      deployState.selectedBranch,
+      deployState.availableBranches,
+      deployState.branchesLoading,
+      deployState.pipeline,
+      deployState.branchError,
+      deployState.advancedConfigExpanded
     );
   }
 
-  /**
-   * 渲染结构化面板
-   */
-  renderStructuredPanel(): string {
-    if (dockerState.activeTab === "containers") {
-      return this.renderContainerPanel();
-    }
+  private buildDeployFingerprint(): string {
+    const profileMarks = deployState.profiles
+      .map((item) => `${item.id}:${item.updatedAt}:${item.mode}:${item.git.enabled ? "1" : "0"}`)
+      .join("|");
 
-    if (dockerState.activeTab === "images") {
-      return this.renderImagePanel();
-    }
+    const stepMarks = deployState.pipeline.steps
+      .map((item) => `${item.step}:${item.status}:${item.message}`)
+      .join("|");
 
-    if (dockerState.activeTab === "stats") {
-      return this.renderStatsPanel();
-    }
-
-    return this.renderComposePanel();
+    return [
+      profileMarks,
+      deployState.selectedProfileId,
+      deployState.selectedBranch,
+      deployState.availableBranches.join("|"),
+      deployState.branchesLoading ? "1" : "0",
+      deployState.branchError ?? "",
+      deployState.advancedConfigExpanded ? "1" : "0",
+      deployState.pipeline.running ? "1" : "0",
+      String(deployState.pipeline.lastRunAt),
+      deployState.pipeline.lastError ?? "",
+      deployState.pipeline.summary,
+      String(deployState.pipeline.logs.length),
+      stepMarks,
+    ].join("||");
   }
 
-  /**
-   * 渲染容器面板
-   */
-  renderContainerPanel(): string {
-    const rows = filterDockerContainers(dockerState.dashboard.containers, dockerState.filters);
-
-    // 如果正在加载且没有数据
-    if (rows.length === 0 && dockerState.pendingAction) {
-      return getDockerLoadingState();
+  private async pickProjectDirectoryFor(fieldPath: "compose.projectPath" | "run.buildContext"): Promise<void> {
+    const selectedPath = await deployService.pickProjectDirectory();
+    if (!selectedPath) {
+      return;
     }
 
-    if (rows.length === 0) {
-      return getDockerEmptyState("未匹配到容器数据，请先执行「容器列表」或「刷新概览」。");
+    deployState.updateActiveProfileField(fieldPath, selectedPath);
+    deployState.resetPipeline();
+    deployState.branchError = null;
+    deployState.setAvailableBranches([]);
+    this.refreshPageView();
+
+    if (deployState.activeProfile?.git.enabled) {
+      await this.refreshDeployBranches();
     }
-
-    const body = rows
-      .map((item) => {
-        const running = isContainerRunning(item.status);
-        const statusClass = running ? "badge-success" : "badge-warning";
-        const actionButton = running
-          ? `<button class="btn btn-secondary btn-xs" data-docker-row-action="stop" data-docker-target="${escapeHtml(item.name)}">停止</button>`
-          : `<button class="btn btn-secondary btn-xs" data-docker-row-action="start" data-docker-target="${escapeHtml(item.name)}">启动</button>`;
-
-        return `
-        <tr>
-          <td><span class="text-text-primary">${escapeHtml(item.name)}</span><div class="text-xs text-text-muted">${escapeHtml(item.id)}</div></td>
-          <td><span class="badge ${statusClass}">${escapeHtml(item.status)}</span></td>
-          <td class="text-text-secondary">${escapeHtml(item.ports)}</td>
-          <td>
-            <div class="docker-row-actions">
-              ${actionButton}
-              <button class="btn btn-secondary btn-xs" data-docker-row-action="restart" data-docker-target="${escapeHtml(item.name)}">重启</button>
-              <button class="btn btn-secondary btn-xs" data-docker-row-action="logs" data-docker-target="${escapeHtml(item.name)}">日志</button>
-            </div>
-          </td>
-        </tr>
-      `;
-      })
-      .join("");
-
-    return `
-    <div class="docker-table-wrapper custom-scrollbar">
-      <table class="docker-table">
-        <thead>
-          <tr>
-            <th>容器</th>
-            <th>状态</th>
-            <th>端口映射</th>
-            <th>快捷操作</th>
-          </tr>
-        </thead>
-        <tbody>${body}</tbody>
-      </table>
-    </div>
-  `;
   }
 
-  /**
-   * 渲染镜像面板
-   */
-  renderImagePanel(): string {
-    const search = dockerState.filters.search.trim().toLowerCase();
-    const rows = dockerState.dashboard.images.filter((item) => {
-      if (!search) {
-        return true;
-      }
-
-      return (
-        item.repository.toLowerCase().includes(search) ||
-        item.tag.toLowerCase().includes(search) ||
-        item.id.toLowerCase().includes(search)
-      );
-    });
-
-    // 如果正在加载且没有数据
-    if (rows.length === 0 && dockerState.pendingAction) {
-      return getDockerLoadingState();
+  private async refreshDeployBranches(): Promise<void> {
+    const profile = deployState.activeProfile;
+    if (!profile || !profile.git.enabled) {
+      deployState.branchError = null;
+      deployState.setAvailableBranches([]);
+      this.refreshPageView();
+      return;
     }
 
-    if (rows.length === 0) {
-      return getDockerEmptyState("未匹配到镜像数据，请先执行「镜像列表」或「刷新概览」。");
+    const projectPath = resolveGitProjectPath(profile);
+    if (!projectPath) {
+      deployState.branchError = "缺少 Git 项目目录，请先完善配置。";
+      this.refreshPageView();
+      return;
     }
 
-    return `
-    <div class="docker-table-wrapper custom-scrollbar">
-      <table class="docker-table">
-        <thead>
-          <tr>
-            <th>仓库</th>
-            <th>Tag</th>
-            <th>ID</th>
-            <th>大小</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows
-            .map(
-              (item) => `
-                <tr>
-                  <td class="text-text-primary">${escapeHtml(item.repository)}</td>
-                  <td>${escapeHtml(item.tag)}</td>
-                  <td>${escapeHtml(item.id)}</td>
-                  <td>${escapeHtml(item.size)}</td>
-                </tr>
-              `
-            )
-            .join("")}
-        </tbody>
-      </table>
-    </div>
-  `;
-  }
+    deployState.branchesLoading = true;
+    deployState.branchError = null;
+    this.refreshPageView();
 
-  /**
-   * 渲染统计面板
-   */
-  renderStatsPanel(): string {
-    const search = dockerState.filters.search.trim().toLowerCase();
-    const rows = dockerState.dashboard.stats.filter((item) => {
-      if (!search) {
-        return true;
-      }
-
-      return item.name.toLowerCase().includes(search);
-    });
-
-    // 如果正在加载且没有数据
-    if (rows.length === 0 && dockerState.pendingAction) {
-      return getDockerLoadingState();
-    }
-
-    if (rows.length === 0) {
-      return getDockerEmptyState("未匹配到资源监控数据，请先执行「资源统计」或「刷新概览」。");
-    }
-
-    return `
-    <div class="docker-stat-grid">
-      ${rows
-        .map((item) => {
-          const memPercent = item.memUsagePercent ?? 0;
-          const memWidth = Math.max(0, Math.min(100, memPercent));
-          const memBadgeClass = item.memUsagePercent === null ? "badge-info" : getBadgeClassByUsage(memPercent);
-
-          return `
-            <div class="docker-stat-card">
-              <div class="flex items-center justify-between mb-2">
-                <h4 class="font-semibold text-text-primary">${escapeHtml(item.name)}</h4>
-                <span class="badge ${getBadgeClassByUsage(item.cpuPercent)}">CPU ${escapeHtml(item.cpuText)}</span>
-              </div>
-              <div class="text-xs text-text-secondary mb-2">内存 ${escapeHtml(item.memUsageText)}</div>
-              <div class="docker-progress mb-3">
-                <div class="docker-progress-value ${getProgressColorClass(memPercent)}" style="width: ${memWidth}%"></div>
-              </div>
-              <div class="flex items-center justify-between text-xs">
-                <span class="text-text-secondary">内存占比</span>
-                <span class="badge ${memBadgeClass}">${item.memUsagePercent === null ? "--" : formatPercent(item.memUsagePercent)}</span>
-              </div>
-              <div class="text-xs text-text-muted mt-2">网络 ${escapeHtml(item.netIoText)}</div>
-            </div>
-          `;
-        })
-        .join("")}
-    </div>
-  `;
-  }
-
-  /**
-   * 渲染 Compose 面板
-   */
-  renderComposePanel(): string {
-    const search = dockerState.filters.search.trim().toLowerCase();
-    const rows = dockerState.dashboard.compose.filter((item) => {
-      if (!search) {
-        return true;
-      }
-
-      return (
-        item.name.toLowerCase().includes(search) ||
-        item.status.toLowerCase().includes(search) ||
-        item.configFiles.toLowerCase().includes(search)
-      );
-    });
-
-    // 如果正在加载且没有数据
-    if (rows.length === 0 && dockerState.pendingAction) {
-      return getDockerLoadingState();
-    }
-
-    if (rows.length === 0) {
-      return getDockerEmptyState("未匹配到 Compose 项目，请先执行「Compose 项目」或「刷新概览」。");
-    }
-
-    return `
-    <div class="docker-table-wrapper custom-scrollbar">
-      <table class="docker-table">
-        <thead>
-          <tr>
-            <th>项目名</th>
-            <th>状态</th>
-            <th>配置文件</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows
-            .map(
-              (item) => `
-                <tr>
-                  <td class="text-text-primary">${escapeHtml(item.name)}</td>
-                  <td><span class="badge ${item.status.toLowerCase().includes("running") ? "badge-success" : "badge-warning"}">${escapeHtml(
-                    item.status
-                  )}</span></td>
-                  <td class="text-xs text-text-secondary">${escapeHtml(item.configFiles)}</td>
-                </tr>
-              `
-            )
-            .join("")}
-        </tbody>
-      </table>
-    </div>
-  `;
-  }
-
-  /**
-   * 绑定 Docker 交互事件
-   */
-  bindDockerActions(): void {
-    this.removeManagedListeners(this.pageListeners);
-    this.removeManagedListeners(this.rowListeners);
-
-    const actionButtons = document.querySelectorAll<HTMLButtonElement>("[data-docker-action]");
-    actionButtons.forEach((button) => {
-      this.addManagedEventListener(this.pageListeners, button, "click", async () => {
-        const action = button.dataset.dockerAction;
-        if (!action) {
-          return;
-        }
-
-        const target = dockerState.target.trim();
-        const requiresTarget = action === "start" || action === "stop" || action === "restart" || action === "logs";
-        await this.runDockerAction(action, requiresTarget ? target || undefined : undefined);
-      });
-    });
-
-    const targetInput = document.getElementById("docker-target") as HTMLInputElement | null;
-    this.addManagedEventListener(this.pageListeners, targetInput, "input", () => {
-      if (!targetInput) {
+    try {
+      const response = await deployService.listGitBranches(projectPath);
+      if (!response.ok || !response.data) {
+        deployState.branchError = response.error ?? "分支获取失败";
+        deployState.setAvailableBranches([]);
+        showGlobalNotice("分支加载失败", deployState.branchError, "error");
         return;
       }
 
-      dockerState.target = targetInput.value;
+      deployState.setAvailableBranches(response.data);
+      if (deployState.availableBranches.length === 0) {
+        deployState.branchError = "未获取到任何分支，请确认该目录是 Git 仓库。";
+        showGlobalNotice("未检测到分支", deployState.branchError, "info");
+      }
+    } catch (error) {
+      deployState.branchError = String(error);
+      deployState.setAvailableBranches([]);
+      showGlobalNotice("分支加载异常", String(error), "error");
+    } finally {
+      deployState.branchesLoading = false;
+      this.refreshPageView();
+    }
+  }
+
+  private openDeployLogsInDrawer(): void {
+    const logs = deployState.pipeline.logs;
+    if (logs.length === 0) {
+      dockerState.output = "暂无部署日志";
+      dockerState.status = "部署日志";
+      dockerState.outputDrawerOpen = true;
+      this.refreshPageView();
+      return;
+    }
+
+    const combined = logs
+      .map((item) => {
+        const lines = [
+          `[${item.step}] ${item.ok ? "成功" : "失败"}${item.skipped ? "（已跳过）" : ""}`,
+          ...item.commands.map((command) => `$ ${command}`),
+          item.output || "(无输出)",
+        ];
+
+        if (item.error) {
+          lines.push(`error: ${item.error}`);
+        }
+
+        return lines.join("\n");
+      })
+      .join("\n\n----------------------------------------\n\n");
+
+    dockerState.output = combined;
+    dockerState.status = deployState.pipeline.lastError ? "部署失败日志" : "部署执行日志";
+    dockerState.outputDrawerOpen = true;
+    this.refreshPageView();
+  }
+
+  private async runDeployPipeline(): Promise<void> {
+    if (deployState.pipeline.running) {
+      return;
+    }
+
+    const profile = deployState.activeProfile;
+    if (!profile) {
+      showGlobalNotice("无法执行部署", "当前没有可用部署配置。", "error");
+      return;
+    }
+
+    if (profile.git.enabled && (deployState.availableBranches.length === 0 || deployState.selectedBranch.trim().length === 0)) {
+      await this.refreshDeployBranches();
+      if (deployState.availableBranches.length === 0) {
+        return;
+      }
+    }
+
+    const selectedBranch = deployState.selectedBranch.trim();
+
+    const validationError = validateProfileForExecution(profile, selectedBranch);
+    if (validationError) {
+      showGlobalNotice("部署参数不完整", validationError, "error");
+      return;
+    }
+
+    if (!this.confirmDeployPipelineRisk(profile, selectedBranch)) {
+      return;
+    }
+
+    const nextState = await this.deployOrchestrator.run(
+      profile,
+      selectedBranch,
+      deployState.pipeline,
+      (pipelineState) => {
+        deployState.setPipeline(pipelineState);
+        this.refreshPageView();
+      }
+    );
+
+    deployState.setPipeline(nextState);
+    this.refreshPageView();
+
+    if (nextState.lastError) {
+      showGlobalNotice("部署失败", nextState.lastError, "error");
+      this.openDeployLogsInDrawer();
+      return;
+    }
+
+    const deployModeText = profile.mode === "run" ? "Run 容器重建" : "Compose 服务更新";
+    const branchText = profile.git.enabled && selectedBranch.length > 0 ? `，分支 ${selectedBranch}` : "";
+    showGlobalNotice("部署完成", `${profile.name} 已完成${deployModeText}${branchText}。`, "success");
+    await this.refreshOverviewWithUiSync("quick");
+  }
+
+  private confirmDeployPipelineRisk(profile: DeployProfile, selectedBranch: string): boolean {
+    if (profile.mode !== "run") {
+      return true;
+    }
+
+    const lines: string[] = [
+      "⚠️ 即将执行一键自动部署（Run 模式）",
+      "本次会先强制删除旧容器，再启动新容器。",
+      `- 容器名称：${profile.run.containerName.trim() || "(未设置)"}`,
+    ];
+
+    if (profile.run.imageSource === "pull") {
+      lines.push(`- 镜像策略：自动拉取最新镜像（${profile.run.imageRef.trim() || "(未设置)"}）`);
+    } else {
+      lines.push(`- 镜像策略：本地构建镜像（${profile.run.imageTag.trim() || "(未设置)"}）`);
+    }
+
+    if (profile.git.enabled && selectedBranch.length > 0) {
+      lines.push(`- 代码分支：${selectedBranch}`);
+    }
+
+    lines.push("", "确认继续执行吗？");
+    const confirmed = window.confirm(lines.join("\n"));
+    if (!confirmed) {
+      showGlobalNotice("已取消部署", "你取消了危险操作确认，部署流程未执行。", "info", 2200);
+    }
+
+    return confirmed;
+  }
+
+  private renderList(showSkeleton: boolean): string {
+    if (showSkeleton) return getDockerPanelSkeleton();
+    const entries = getSelectionEntries(dockerState.activeTab, dockerState.dashboard, dockerState.filters);
+    if (entries.length === 0 && dockerState.pendingAction) return getDockerLoadingState();
+    if (entries.length === 0) return getDockerEmptyState(TAB_EMPTY[dockerState.activeTab]);
+    return `<ul class="docker-workbench-list-group">${entries.map((entry) => {
+      const active = dockerState.selected?.kind === entry.kind && dockerState.selected?.key === entry.key;
+      return `<li><button type="button" class="docker-workbench-item ${active ? "active" : ""}" data-docker-select-kind="${entry.kind}" data-docker-select-key="${escapeHtml(entry.key)}"><div class="docker-workbench-item-title">${escapeHtml(entry.title)}</div><div class="docker-workbench-item-subtitle">${escapeHtml(entry.subtitle)}</div></button></li>`;
+    }).join("")}</ul>`;
+  }
+
+  private renderDetail(showSkeleton: boolean): string {
+    if (showSkeleton) return getDockerPanelSkeleton();
+    const entry = findSelectionEntry(dockerState.activeTab, dockerState.dashboard, dockerState.filters, dockerState.selected);
+    if (!entry) return getDockerEmptyState("请先从左侧列表选择对象。");
+
+    const safe = this.resolveSafeActions(entry.kind, entry.key);
+    const primarySafeAction = safe[0] ?? null;
+    const danger = DANGER_DOCKER_ACTIONS.filter((action) => getDockerActionMeta(action)?.supportKinds.includes(entry.kind));
+
+    return `
+      <div class="docker-workbench-detail-card">
+        <div class="docker-workbench-detail-head"><h3 class="docker-workbench-detail-title">${escapeHtml(entry.title)}</h3><span class="badge badge-info">${TAB_LABEL[entry.kind]}</span></div>
+        <div class="docker-workbench-detail-subtitle">${escapeHtml(entry.subtitle)}</div>
+        <div class="docker-workbench-detail-meta">${this.renderDetailMeta(entry.kind, entry.key)}</div>
+        <div class="docker-workbench-action-section"><div class="docker-workbench-action-title">快捷操作</div><div class="docker-workbench-action-row docker-workbench-action-row-safe">${safe.map((action) => this.renderActionButton(action, entry.kind, false, action === primarySafeAction)).join("") || "<span class=\"text-text-muted\">当前对象无可执行快捷操作</span>"}</div>${this.renderSafeActionHint(entry.kind, primarySafeAction)}</div>
+        ${dockerState.advancedModeEnabled && danger.length > 0 ? `<div class="docker-workbench-action-section is-danger"><div class="docker-workbench-action-title">危险操作（高级模式）</div><div class="docker-workbench-action-row">${danger.map((action) => this.renderActionButton(action, entry.kind, true)).join("")}</div>${this.renderDangerHint(entry.kind)}</div>` : ""}
+      </div>
+    `;
+  }
+
+  private renderDetailMeta(kind: DockerSelectionKind, key: string): string {
+    if (kind === "container") {
+      const item = dockerState.dashboard.containers.find((row) => row.id === key);
+      if (!item) return '<div class="text-text-muted">容器信息已失效，请刷新概览。</div>';
+      const running = isContainerRunning(item.status);
+      return `<div class="docker-workbench-meta-grid"><div><span class="text-text-muted">容器 ID</span><code>${escapeHtml(item.id)}</code></div><div><span class="text-text-muted">状态</span><span class="badge ${running ? "badge-success" : "badge-warning"}">${escapeHtml(item.status)}</span></div><div><span class="text-text-muted">端口映射</span><span>${escapeHtml(item.ports || "--")}</span></div></div>`;
+    }
+    if (kind === "image") {
+      const item = dockerState.dashboard.images.find((row) => row.id === key);
+      if (!item) return '<div class="text-text-muted">镜像信息已失效，请刷新概览。</div>';
+      return `<div class="docker-workbench-meta-grid"><div><span class="text-text-muted">仓库</span><span>${escapeHtml(item.repository)}</span></div><div><span class="text-text-muted">Tag</span><span>${escapeHtml(item.tag)}</span></div><div><span class="text-text-muted">镜像 ID</span><code>${escapeHtml(item.id)}</code></div><div><span class="text-text-muted">大小</span><span>${escapeHtml(item.size)}</span></div></div>`;
+    }
+    if (kind === "stat") {
+      const item = dockerState.dashboard.stats.find((row) => row.name === key);
+      if (!item) return '<div class="text-text-muted">资源信息已失效，请刷新概览。</div>';
+      return `<div class="docker-workbench-meta-grid"><div><span class="text-text-muted">CPU</span><span class="badge ${getBadgeClassByUsage(item.cpuPercent)}">${escapeHtml(item.cpuText)}</span></div><div><span class="text-text-muted">内存</span><span>${escapeHtml(item.memUsageText)}</span></div><div><span class="text-text-muted">网络 IO</span><span>${escapeHtml(item.netIoText)}</span></div></div>`;
+    }
+    const item = dockerState.dashboard.compose.find((row) => row.name === key);
+    if (!item) return '<div class="text-text-muted">Compose 信息已失效，请刷新概览。</div>';
+    return `<div class="docker-workbench-meta-grid"><div><span class="text-text-muted">状态</span><span>${escapeHtml(item.status)}</span></div><div><span class="text-text-muted">配置文件</span><span>${escapeHtml(item.configFiles)}</span></div></div>`;
+  }
+
+  private renderActionButton(action: DockerActionType, kind: DockerSelectionKind, danger: boolean, primary = false): string {
+    const target = resolveActionTarget(action, dockerState.activeTab, dockerState.dashboard, dockerState.filters, dockerState.selected);
+    const state = resolveDockerActionState(action, kind, target, dockerState.pendingAction);
+    const armed = danger && this.isDangerConfirmArmed(action, target);
+    const label = danger && armed ? `确认${getDockerActionLabel(action)}` : getDockerActionLabel(action);
+    const toneClass = danger ? "btn-secondary" : primary ? "btn-primary" : "btn-secondary";
+    const classes = [
+      "btn",
+      toneClass,
+      "btn-xs",
+      "docker-workbench-action-btn",
+      primary ? "is-primary" : "",
+      danger ? "is-danger" : "",
+      armed ? "is-armed" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return `<button type="button" class="${classes}" data-docker-action="${action}" data-docker-target="${escapeHtml(target ?? "")}" title="${escapeHtml(state.reason ?? "")}" ${state.disabled ? "disabled" : ""}>${escapeHtml(label)}</button>`;
+  }
+
+  private resolveSafeActions(kind: DockerSelectionKind, key: string): DockerActionType[] {
+    if (kind === "image") {
+      return ["run"];
+    }
+
+    if (kind !== "container") {
+      return SAFE_DOCKER_ACTIONS.filter((action) => getDockerActionMeta(action)?.supportKinds.includes(kind));
+    }
+
+    const container = dockerState.dashboard.containers.find((row) => row.id === key);
+    const running = container ? isContainerRunning(container.status) : false;
+
+    if (running) {
+      return ["stop", "restart", "logs"];
+    }
+
+    return ["start", "logs"];
+  }
+
+  private renderSafeActionHint(kind: DockerSelectionKind, primaryAction: DockerActionType | null): string {
+    if (!primaryAction) {
+      return "";
+    }
+
+    if (kind === "image" && primaryAction === "run") {
+      return '<div class="docker-workbench-safe-hint">一键启动会基于当前镜像执行后台创建容器，容器名自动生成，无需命令行。</div>';
+    }
+
+    if (kind === "container" && primaryAction === "start") {
+      return '<div class="docker-workbench-safe-hint">容器已停止，点击「启动」即可恢复运行。</div>';
+    }
+
+    if (kind === "container" && primaryAction === "stop") {
+      return '<div class="docker-workbench-safe-hint">容器运行中，停止后会自动刷新列表并切回可启动状态。</div>';
+    }
+
+    return "";
+  }
+
+  private renderDangerHint(kind: DockerSelectionKind): string {
+    const confirm = dockerState.dangerConfirm;
+    if (!confirm || confirm.expiresAt < Date.now()) {
+      return '<div class="docker-workbench-danger-hint">危险操作需二次确认，确认窗口 8 秒后自动失效。</div>';
+    }
+    const entry = findSelectionEntry(dockerState.activeTab, dockerState.dashboard, dockerState.filters, dockerState.selected);
+    if (!entry || entry.kind !== kind || entry.target !== confirm.target) {
+      return '<div class="docker-workbench-danger-hint">危险操作需二次确认，确认窗口 8 秒后自动失效。</div>';
+    }
+    return `<div class="docker-workbench-danger-hint is-armed">已进入确认态：再次点击「${escapeHtml(getDockerActionLabel(confirm.action))}」将立即执行。</div>`;
+  }
+
+  bindDockerActions(): void {
+    this.removeManagedListeners(this.pageListeners);
+    const root = document.querySelector(".docker-page");
+    if (!root) return;
+
+    this.addManaged(this.pageListeners, root, "click", async (event) => {
+      const target = event.target as HTMLElement;
+
+      const deployActionBtn = target.closest<HTMLButtonElement>("[data-deploy-action]");
+      if (deployActionBtn) {
+        const action = deployActionBtn.dataset.deployAction;
+        if (!action) return;
+
+        if (action === "toggle-advanced-config") {
+          deployState.setAdvancedConfigExpanded(!deployState.advancedConfigExpanded);
+          this.refreshPageView();
+          return;
+        }
+
+        if (action === "choose-compose-project-dir") {
+          await this.pickProjectDirectoryFor("compose.projectPath");
+          return;
+        }
+
+        if (action === "choose-run-build-dir") {
+          await this.pickProjectDirectoryFor("run.buildContext");
+          return;
+        }
+
+        if (action === "add-profile") {
+          deployState.addProfile("新部署配置");
+          deployState.resetPipeline();
+          deployState.branchError = null;
+          deployState.setAvailableBranches([]);
+          this.refreshPageView();
+          return;
+        }
+
+        if (action === "save-profile") {
+          showGlobalNotice("配置已保存", "部署配置已写入本地存储。", "success", 2000);
+          return;
+        }
+
+        if (action === "delete-profile") {
+          const profileName = deployState.activeProfile?.name ?? "当前配置";
+          deployState.removeActiveProfile();
+          deployState.resetPipeline();
+          deployState.branchError = null;
+          deployState.setAvailableBranches([]);
+          showGlobalNotice("配置已删除", `${profileName} 已移除。`, "info", 2200);
+          this.refreshPageView();
+          return;
+        }
+
+        if (action === "refresh-branches") {
+          await this.refreshDeployBranches();
+          return;
+        }
+
+        if (action === "run-pipeline") {
+          await this.runDeployPipeline();
+          return;
+        }
+
+        if (action === "view-log") {
+          this.openDeployLogsInDrawer();
+          return;
+        }
+      }
+
+      const refreshBtn = target.closest<HTMLButtonElement>("[data-docker-refresh-overview]");
+      if (refreshBtn) {
+        if (!dockerState.pendingAction) await this.refreshOverviewWithUiSync("quick");
+        return;
+      }
+      if (target.closest("[data-docker-output-toggle]")) {
+        dockerState.outputDrawerOpen = !dockerState.outputDrawerOpen;
+        this.refreshPageView();
+        return;
+      }
+      if (target.closest("[data-docker-drawer-close]")) {
+        dockerState.outputDrawerOpen = false;
+        this.refreshPageView();
+        return;
+      }
+
+      const tabBtn = target.closest<HTMLButtonElement>("[data-docker-tab]");
+      if (tabBtn) {
+        const tab = tabBtn.dataset.dockerTab;
+        if (!tab || !this.isDockerPanelTab(tab)) return;
+        dockerState.activeTab = tab;
+        dockerState.dangerConfirm = null;
+
+        if (dockerState.filters.search.trim().length > 0) {
+          const nextEntries = getSelectionEntries(tab, dockerState.dashboard, dockerState.filters);
+          if (nextEntries.length === 0) {
+            dockerState.filters.search = "";
+            const searchInput = document.getElementById("docker-search") as HTMLInputElement | null;
+            if (searchInput) {
+              searchInput.value = "";
+            }
+            showGlobalNotice("已清空搜索词", "切换分组后没有匹配项，已自动恢复完整列表。", "info", 2000);
+          }
+        }
+
+        this.requestPanelSectionUpdate();
+        return;
+      }
+
+      const statusChipBtn = target.closest<HTMLButtonElement>("[data-docker-status-filter]");
+      if (statusChipBtn) {
+        const status = statusChipBtn.dataset.dockerStatusFilter;
+        if (status !== "all" && status !== "running" && status !== "exited") {
+          return;
+        }
+
+        dockerState.filters.status = status;
+        dockerState.dangerConfirm = null;
+        this.requestPanelSectionUpdate();
+        return;
+      }
+
+      const selectBtn = target.closest<HTMLButtonElement>("[data-docker-select-key]");
+      if (selectBtn) {
+        const kind = selectBtn.dataset.dockerSelectKind;
+        const key = selectBtn.dataset.dockerSelectKey;
+        if (!kind || !key || !this.isDockerSelectionKind(kind)) return;
+        dockerState.selected = { kind, key };
+        dockerState.dangerConfirm = null;
+        this.requestPanelSectionUpdate();
+        return;
+      }
+
+      const actionBtn = target.closest<HTMLButtonElement>("[data-docker-action]");
+      if (!actionBtn || dockerState.pendingAction) return;
+      const actionRaw = actionBtn.dataset.dockerAction;
+      if (!actionRaw || !this.isDockerActionType(actionRaw)) return;
+
+      const action = actionRaw;
+      const value = actionBtn.dataset.dockerTarget || resolveActionTarget(action, dockerState.activeTab, dockerState.dashboard, dockerState.filters, dockerState.selected);
+      if (!value) {
+        showGlobalNotice("无法执行操作", "当前选中项目标无效，请刷新概览后重试。", "error");
+        return;
+      }
+
+      if (action === "rm" || action === "rmi") {
+        const confirmed = dockerState.consumeDangerConfirm(action, value);
+        if (!confirmed) {
+          dockerState.armDangerConfirm(action, value);
+          showGlobalNotice("危险操作确认", "请在 8 秒内再次点击同一按钮确认执行。", "info", 2600);
+          this.refreshPageView();
+          return;
+        }
+      }
+
+      dockerState.target = value;
+      await this.runDockerAction(action, value);
+    });
+
+    this.addManaged(this.pageListeners, root, "change", async (event) => {
+      const target = event.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+
+      const deployInput = target.dataset.deployInput;
+      if (deployInput === "selectedProfileId") {
+        deployState.selectProfile(target.value);
+        deployState.resetPipeline();
+        deployState.branchError = null;
+        deployState.setAvailableBranches([]);
+        this.refreshPageView();
+
+        if (deployState.activeProfile?.git.enabled) {
+          await this.refreshDeployBranches();
+        }
+        return;
+      }
+
+      if (deployInput === "selectedBranch") {
+        deployState.setSelectedBranch(target.value);
+        this.refreshPageView();
+        return;
+      }
+
+      const fieldPath = target.dataset.deployField;
+      if (!fieldPath) {
+        return;
+      }
+
+      const nextValue = target instanceof HTMLInputElement && target.type === "checkbox"
+        ? target.checked
+        : target.value;
+
+      deployState.updateActiveProfileField(fieldPath, nextValue);
+      deployState.resetPipeline();
+
+      if (fieldPath === "mode" || fieldPath === "compose.projectPath" || fieldPath === "run.buildContext" || fieldPath === "git.enabled") {
+        deployState.branchError = null;
+        deployState.setAvailableBranches([]);
+      }
+
+      this.refreshPageView();
     });
 
     const searchInput = document.getElementById("docker-search") as HTMLInputElement | null;
-    this.addManagedEventListener(this.pageListeners, searchInput, "input", () => {
-      if (!searchInput) {
-        return;
-      }
-
+    this.addManaged(this.pageListeners, searchInput, "input", () => {
+      if (!searchInput) return;
       dockerState.filters.search = searchInput.value;
+      dockerState.dangerConfirm = null;
       this.debouncedUpdatePanel();
     });
 
-    const statusFilter = document.getElementById("docker-status-filter") as HTMLSelectElement | null;
-    this.addManagedEventListener(this.pageListeners, statusFilter, "change", () => {
-      if (!statusFilter) {
-        return;
-      }
-
-      const statusValue = statusFilter.value;
-      if (statusValue !== "all" && statusValue !== "running" && statusValue !== "exited") {
-        return;
-      }
-
-      dockerState.filters.status = statusValue;
-      this.requestPanelSectionUpdate();
-    });
-
-    const tabButtons = document.querySelectorAll<HTMLButtonElement>("[data-docker-tab]");
-    tabButtons.forEach((button) => {
-      this.addManagedEventListener(this.pageListeners, button, "click", () => {
-        const tab = button.dataset.dockerTab as DockerPanelTab | undefined;
-        if (!tab) {
-          return;
-        }
-
-        dockerState.activeTab = tab;
-        this.requestPanelSectionUpdate();
-      });
-    });
-
-    const refreshOverviewBtn = document.getElementById("docker-refresh-overview");
-    this.addManagedEventListener(this.pageListeners, refreshOverviewBtn, "click", () => {
-      void this.refreshOverviewWithUiSync("quick");
-    });
-
-    this.bindDockerRowActions();
-  }
-
-  /**
-   * 绑定行级操作按钮
-   */
-  bindDockerRowActions(): void {
-    this.removeManagedListeners(this.rowListeners);
-
-    const rowButtons = document.querySelectorAll<HTMLButtonElement>("[data-docker-row-action]");
-    rowButtons.forEach((button) => {
-      this.addManagedEventListener(this.rowListeners, button, "click", async () => {
-        const action = button.dataset.dockerRowAction;
-        const target = button.dataset.dockerTarget;
-        if (!action || !target) {
-          return;
-        }
-
-        dockerState.target = target;
-        await this.runDockerAction(action, target);
-      });
+    const advancedMode = document.getElementById("docker-advanced-mode") as HTMLInputElement | null;
+    this.addManaged(this.pageListeners, advancedMode, "change", () => {
+      if (!advancedMode) return;
+      dockerState.advancedModeEnabled = advancedMode.checked;
+      dockerState.dangerConfirm = null;
+      saveDockerAdvancedMode(advancedMode.checked);
+      dockerState.panelNeedsRefresh = true;
+      this.refreshPageView();
     });
   }
 
-  /**
-   * 执行 Docker 命令
-   */
-  async runDockerAction(action: string, target?: string): Promise<void> {
-    const activeTabAtStart = dockerState.activeTab;
+  async runDockerAction(action: DockerActionType, target?: string): Promise<void> {
+    const tabAtStart = dockerState.activeTab;
+    let shouldRefreshOverview = false;
+    let shouldResetContainerStatusFilter = false;
+    let filterResetMessage = "";
+    let successNotice = "";
 
     dockerState.setPendingAction(action);
     dockerState.output = "执行中...";
@@ -592,11 +747,11 @@ export class DockerPage {
 
     try {
       const response = await dockerService.runDockerAction(action, target);
-
       if (!response.ok || !response.data) {
         dockerState.status = `失败 · ${response.elapsedMs}ms`;
         dockerState.output = `执行失败\n${response.error ?? "未知错误"}`;
         dockerState.dashboard.rawOutput = dockerState.output;
+        dockerState.outputDrawerOpen = true;
         return;
       }
 
@@ -605,142 +760,197 @@ export class DockerPage {
       dockerState.output = `[${result.command}]\nexit=${result.exitCode}\n\n${result.stdout || "(无输出)"}${stderr}`;
       dockerState.status = `${result.exitCode === 0 ? "成功" : "失败"} · ${response.elapsedMs}ms`;
 
-      const switchTab = this.resolveSwitchTab(action, activeTabAtStart);
+      const switchTab = (action === "ps" || action === "images" || action === "stats" || action === "compose_ls") && dockerState.activeTab === tabAtStart;
       dockerService.applyActionResult(result, switchTab);
+      if (shouldAutoOpenDockerOutputDrawer(action, result.exitCode)) dockerState.outputDrawerOpen = true;
 
-      if ((action === "start" || action === "stop" || action === "restart") && result.exitCode === 0) {
-        void this.refreshOverviewWithUiSync("quick");
+      if ((action === "run" || action === "start" || action === "stop" || action === "restart" || action === "rm" || action === "rmi") && result.exitCode === 0) {
+        shouldRefreshOverview = true;
+      }
+
+      if (result.exitCode === 0 && action === "run") {
+        const createdContainerId = result.stdout
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .find((line) => line.length > 0);
+
+        dockerState.activeTab = "containers";
+        dockerState.filters.status = "all";
+        dockerState.selected = null;
+
+        successNotice = createdContainerId
+          ? `镜像已启动，容器 ID: ${createdContainerId.slice(0, 12)}`
+          : "镜像已启动并创建新容器。";
+      }
+
+      if (result.exitCode === 0 && dockerState.activeTab === "containers") {
+        if (action === "stop" && dockerState.filters.status === "running") {
+          dockerState.filters.status = "all";
+          shouldResetContainerStatusFilter = true;
+          filterResetMessage = "容器已停止，已自动切换到“全部状态”，方便继续执行启动。";
+        }
+
+        if (action === "start" && dockerState.filters.status === "exited") {
+          dockerState.filters.status = "all";
+          shouldResetContainerStatusFilter = true;
+          filterResetMessage = "容器已启动，已自动切换到“全部状态”，方便继续观察。";
+        }
       }
     } catch (error) {
       dockerState.status = "异常";
       dockerState.output = `调用异常\n${String(error)}`;
       dockerState.dashboard.rawOutput = dockerState.output;
+      dockerState.outputDrawerOpen = true;
     } finally {
       dockerState.pendingAction = null;
+      if (shouldResetContainerStatusFilter) {
+        dockerState.panelNeedsRefresh = true;
+      }
       this.refreshPageView();
+
+      if (shouldResetContainerStatusFilter) {
+        showGlobalNotice("筛选已自动调整", filterResetMessage, "info", 3000);
+      }
+
+      if (successNotice) {
+        showGlobalNotice("操作成功", successNotice, "success", 3200);
+      }
+
+      if (shouldRefreshOverview) {
+        void this.refreshOverviewWithUiSync("quick");
+      }
     }
   }
 
-  /**
-   * 判断是否需要切换 Tab
-   */
-  private resolveSwitchTab(action: string, activeTabAtStart: DockerPanelTab): boolean {
-    const canSwitchTabByAction = action === "ps" || action === "images" || action === "stats" || action === "compose_ls";
-    if (!canSwitchTabByAction) {
-      return false;
+  async refreshOverview(mode: DockerOverviewMode = "quick"): Promise<void> {
+    if (dockerState.pendingAction !== null) {
+      return;
     }
 
-    return dockerState.activeTab === activeTabAtStart;
+    await this.refreshOverviewWithUiSync(mode);
   }
 
-  /**
-   * 更新面板区域
-   */
   updatePanelSection(): void {
-    if (appState.currentPage !== "docker") {
-      return;
-    }
-
-    const showBootstrapSkeleton = this.shouldRenderBootstrapSkeleton();
-
-    const panel = document.getElementById("docker-structured-panel");
-    if (panel) {
-      const nextMarkup = showBootstrapSkeleton ? getDockerPanelSkeleton() : this.renderStructuredPanel();
-      if (panel.innerHTML !== nextMarkup) {
-        // 先移除旧的行级监听器，避免内存泄漏
-        this.removeManagedListeners(this.rowListeners);
-        panel.innerHTML = nextMarkup;
-        if (!showBootstrapSkeleton) {
-          this.bindDockerRowActions();
-        }
-      }
-    }
-
-    const tabButtons = document.querySelectorAll<HTMLButtonElement>("[data-docker-tab]");
-    tabButtons.forEach((button) => {
-      const tab = button.dataset.dockerTab;
-      button.classList.toggle("active", tab === dockerState.activeTab);
-    });
-
-    dockerState.panelNeedsRefresh = false;
+    if (appState.currentPage !== "docker") return;
+    this.syncSelection();
+    dockerState.panelNeedsRefresh = true;
+    this.refreshPageView();
   }
 
-  /**
-   * 刷新页面视图
-   */
   refreshPageView(): void {
-    if (appState.currentPage !== "docker") {
+    if (appState.currentPage !== "docker") return;
+    const content = document.getElementById("content");
+    if (!content) return;
+    const root = content.querySelector(".docker-page");
+    if (!root) {
+      void this.render(content);
       return;
     }
 
-    const contentEl = document.getElementById("content");
-    if (!contentEl) {
-      return;
-    }
+    this.clearExpiredDangerConfirm();
+    this.syncSelection();
 
-    const statusEl = document.getElementById("docker-status");
-    const outputEl = document.getElementById("docker-output");
-    const structuredPanel = document.getElementById("docker-structured-panel");
+    const showSkeleton = this.shouldRenderBootstrapSkeleton();
+    const pendingText = dockerState.pendingAction ? `执行中: ${dockerState.pendingAction}` : dockerState.status;
+    const updateText = (id: string, value: string): void => {
+      const el = document.getElementById(id);
+      if (el && el.textContent !== value) el.textContent = value;
+    };
 
-    if (!statusEl || !outputEl || !structuredPanel) {
-      void this.render(contentEl);
-      return;
-    }
-
-    const summaryDisplay = this.getSummaryDisplayValues();
-    const showBootstrapSkeleton = this.shouldRenderBootstrapSkeleton();
-
-    // 批量更新 DOM（减少重排）
-    const updates = [
-      { el: statusEl, value: dockerState.status },
-      { el: outputEl, value: dockerState.output },
-      { el: document.getElementById("docker-pending"), value: dockerState.pendingAction ? `执行中: ${dockerState.pendingAction}` : "空闲" },
-      { el: document.getElementById("docker-last-command"), value: dockerState.dashboard.lastCommand || "尚未执行" },
-      { el: document.getElementById("docker-version-line"), value: dockerState.dashboard.versionText || "未获取 docker version" },
-      { el: document.getElementById("docker-info-line"), value: dockerState.dashboard.infoText || "未获取 docker info" },
-      { el: document.getElementById("docker-compose-count"), value: summaryDisplay.composeCount },
-      { el: document.getElementById("docker-avg-cpu"), value: summaryDisplay.avgCpu },
-      { el: document.getElementById("docker-net-rx"), value: summaryDisplay.netRx },
-      { el: document.getElementById("docker-net-tx"), value: summaryDisplay.netTx },
-    ];
-
-    updates.forEach(({ el, value }) => {
-      if (el && el.textContent !== value) {
-        el.textContent = value;
-      }
-    });
+    updateText("docker-status", pendingText);
+    updateText("docker-last-command", dockerState.dashboard.lastCommand || "尚未执行");
+    updateText("docker-version-line", dockerState.dashboard.versionText || "未获取");
+    updateText("docker-overview-time", this.formatOverviewRefreshedTime());
 
     const summaryGrid = document.getElementById("docker-summary-grid");
     if (summaryGrid) {
-      const nextSummary = showBootstrapSkeleton ? getDockerSummarySkeletonCards() : this.renderSummaryCards();
-      if (summaryGrid.innerHTML !== nextSummary) {
-        summaryGrid.innerHTML = nextSummary;
+      const html = showSkeleton ? getDockerSummarySkeletonCards() : this.renderSummaryCards();
+      if (summaryGrid.innerHTML !== html) summaryGrid.innerHTML = html;
+    }
+
+    const deployHost = document.getElementById("deploy-pipeline-host");
+    if (deployHost) {
+      const deployFingerprint = this.buildDeployFingerprint();
+      if (deployFingerprint !== this.lastDeployFingerprint) {
+        deployHost.innerHTML = this.renderDeployPanel();
+        this.lastDeployFingerprint = deployFingerprint;
       }
     }
 
-    if (dockerState.panelNeedsRefresh || showBootstrapSkeleton) {
-      const nextPanel = showBootstrapSkeleton ? getDockerPanelSkeleton() : this.renderStructuredPanel();
-      if (structuredPanel.innerHTML !== nextPanel) {
-        this.removeManagedListeners(this.rowListeners);
-        structuredPanel.innerHTML = nextPanel;
-        if (!showBootstrapSkeleton) {
-          this.bindDockerRowActions();
-        }
+    if (dockerState.panelNeedsRefresh || showSkeleton) {
+      const listHost = document.getElementById("docker-workbench-left-list");
+      if (listHost) {
+        const html = this.renderList(showSkeleton);
+        if (listHost.innerHTML !== html) listHost.innerHTML = html;
       }
+
+      const detailHost = document.getElementById("docker-workbench-right-panel");
+      if (detailHost) {
+        const html = this.renderDetail(showSkeleton);
+        if (detailHost.innerHTML !== html) detailHost.innerHTML = html;
+      }
+
       dockerState.panelNeedsRefresh = false;
     }
 
-    this.syncActionButtons();
+    document.querySelectorAll<HTMLButtonElement>("[data-docker-tab]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.dockerTab === dockerState.activeTab);
+    });
+
+    const statusFilterGroup = document.getElementById("docker-status-filter-group") as HTMLElement | null;
+    if (statusFilterGroup) {
+      statusFilterGroup.style.display = dockerState.activeTab === "containers" ? "" : "none";
+
+      statusFilterGroup
+        .querySelectorAll<HTMLButtonElement>("[data-docker-status-filter]")
+        .forEach((button) => {
+          const status = button.dataset.dockerStatusFilter;
+          button.classList.toggle("active", status === dockerState.filters.status);
+        });
+    }
+
+    const outputBtn = document.querySelector<HTMLButtonElement>("[data-docker-output-toggle]");
+    if (outputBtn) outputBtn.textContent = dockerState.outputDrawerOpen ? "收起输出" : "查看输出";
+    const advancedMode = document.getElementById("docker-advanced-mode") as HTMLInputElement | null;
+    if (advancedMode) advancedMode.checked = dockerState.advancedModeEnabled;
+
+    const drawerHost = document.getElementById("docker-output-drawer-host");
+    if (drawerHost) {
+      const html = renderDockerOutputDrawer({
+        open: dockerState.outputDrawerOpen,
+        status: dockerState.status,
+        output: dockerState.output,
+        lastCommand: dockerState.dashboard.lastCommand || "尚未执行",
+      });
+      if (drawerHost.innerHTML !== html) drawerHost.innerHTML = html;
+    }
   }
 
-  private hasOverviewData(): boolean {
-    return (
-      dockerState.dashboard.containers.length > 0 ||
-      dockerState.dashboard.images.length > 0 ||
-      dockerState.dashboard.stats.length > 0 ||
-      dockerState.dashboard.compose.length > 0 ||
-      dockerState.lastOverviewAt > 0
-    );
+  private syncSelection(): void {
+    dockerState.selected = normalizeWorkbenchSelection(dockerState.activeTab, dockerState.dashboard, dockerState.filters, dockerState.selected);
+    const entry = findSelectionEntry(dockerState.activeTab, dockerState.dashboard, dockerState.filters, dockerState.selected);
+    dockerState.target = entry?.target ?? "";
+    if (!dockerState.advancedModeEnabled) dockerState.dangerConfirm = null;
+    if (dockerState.dangerConfirm && dockerState.dangerConfirm.expiresAt < Date.now()) dockerState.dangerConfirm = null;
+    if (dockerState.dangerConfirm && (!entry || entry.target !== dockerState.dangerConfirm.target)) dockerState.dangerConfirm = null;
+  }
+
+  private isDangerConfirmArmed(action: DockerActionType, target: string | null): boolean {
+    if (!target || !dockerState.dangerConfirm) return false;
+    if (dockerState.dangerConfirm.expiresAt < Date.now()) {
+      dockerState.dangerConfirm = null;
+      return false;
+    }
+    return dockerState.dangerConfirm.action === action && dockerState.dangerConfirm.target === target;
+  }
+
+  private clearExpiredDangerConfirm(): void {
+    if (dockerState.dangerConfirm && dockerState.dangerConfirm.expiresAt < Date.now()) dockerState.dangerConfirm = null;
+  }
+
+  private formatOverviewRefreshedTime(): string {
+    if (dockerState.lastOverviewAt <= 0) return "未刷新";
+    return new Date(dockerState.lastOverviewAt).toLocaleTimeString("zh-CN", { hour12: false });
   }
 
   private isOverviewLoading(): boolean {
@@ -748,38 +958,8 @@ export class DockerPage {
   }
 
   private shouldRenderBootstrapSkeleton(): boolean {
-    if (dockerState.lastOverviewAt > 0) {
-      return false;
-    }
-
+    if (dockerState.lastOverviewAt > 0) return false;
     return !dockerState.bootstrapped || this.isOverviewLoading();
-  }
-
-  private getSummaryDisplayValues(): { composeCount: string; avgCpu: string; netRx: string; netTx: string } {
-    if (dockerState.lastOverviewAt === 0) {
-      if (this.isOverviewLoading()) {
-        return {
-          composeCount: "...",
-          avgCpu: "...",
-          netRx: "加载中",
-          netTx: "加载中",
-        };
-      }
-
-      return {
-        composeCount: "--",
-        avgCpu: "--",
-        netRx: "待获取",
-        netTx: "待获取",
-      };
-    }
-
-    return {
-      composeCount: String(dockerState.dashboard.summary.composeProjects),
-      avgCpu: formatPercent(dockerState.dashboard.summary.avgCpuPercent),
-      netRx: dockerState.dashboard.summary.netRxText,
-      netTx: dockerState.dashboard.summary.netTxText,
-    };
   }
 
   private async refreshOverviewWithUiSync(mode: DockerOverviewMode = "quick"): Promise<void> {
@@ -787,100 +967,66 @@ export class DockerPage {
       dockerState.panelNeedsRefresh = true;
       this.refreshPageView();
     }
-
     await dockerService.refreshOverview(mode);
-
     if (appState.currentPage === "docker") {
       dockerState.panelNeedsRefresh = true;
+      this.syncSelection();
       this.refreshPageView();
     }
   }
 
-  private addManagedEventListener(
-    bucket: ManagedListenerEntry[],
-    element: Element | null,
-    event: string,
-    handler: EventListener
-  ): void {
-    if (!element) {
-      return;
-    }
-
+  private addManaged(bucket: ManagedListener[], element: Element | null, event: string, handler: EventListener): void {
+    if (!element) return;
     element.addEventListener(event, handler);
     bucket.push({ element, event, handler });
   }
 
-  private removeManagedListeners(bucket: ManagedListenerEntry[]): void {
-    for (const listener of bucket) {
-      listener.element.removeEventListener(listener.event, listener.handler);
-    }
-
+  private removeManagedListeners(bucket: ManagedListener[]): void {
+    for (const listener of bucket) listener.element.removeEventListener(listener.event, listener.handler);
     bucket.length = 0;
   }
 
   private startMemoryMonitoring(): void {
-    if (!import.meta.env.DEV || this.memoryMonitorTimer !== null) {
-      return;
-    }
-
+    if (!import.meta.env.DEV || this.memoryMonitorTimer !== null) return;
     this.memoryMonitorTimer = MemoryMonitor.getInstance().startMonitoring(10_000);
   }
 
   private requestPanelSectionUpdate(): void {
-    if (this.panelUpdateRafId !== null) {
-      return;
-    }
-
+    if (this.panelUpdateRafId !== null) return;
     this.panelUpdateRafId = window.requestAnimationFrame(() => {
       this.panelUpdateRafId = null;
       this.updatePanelSection();
     });
   }
 
+  private isDockerPanelTab(value: string): value is DockerPanelTab {
+    return value === "containers" || value === "images" || value === "stats" || value === "compose";
+  }
+
+  private isDockerSelectionKind(value: string): value is DockerSelectionKind {
+    return value === "container" || value === "image" || value === "stat" || value === "compose";
+  }
+
+  private isDockerActionType(value: string): value is DockerActionType {
+    return getDockerActionMeta(value as DockerActionType) !== undefined;
+  }
+
   cleanup(): void {
     this.removeManagedListeners(this.pageListeners);
-    this.removeManagedListeners(this.rowListeners);
-
     this.debouncedUpdatePanel.cancel();
-
     if (this.panelUpdateRafId !== null) {
       window.cancelAnimationFrame(this.panelUpdateRafId);
       this.panelUpdateRafId = null;
     }
-
     if (this.memoryMonitorTimer !== null) {
       MemoryMonitor.getInstance().stopMonitoring(this.memoryMonitorTimer);
       this.memoryMonitorTimer = null;
     }
-
     this.summaryCardsCache = null;
     this.lastSummaryFingerprint = null;
-
-    if (import.meta.env.DEV) {
-      MemoryMonitor.getInstance().logMemorySnapshot("DockerPage cleanup");
-    }
-  }
-
-  /**
-   * 同步操作按钮状态
-   */
-  private syncActionButtons(): void {
-    const buttons = document.querySelectorAll<HTMLButtonElement>("[data-docker-action]");
-    buttons.forEach((button) => {
-      const action = button.dataset.dockerAction;
-      const label = button.dataset.label ?? button.textContent ?? "执行";
-      if (!action) {
-        return;
-      }
-
-      const isBusy = dockerState.pendingAction !== null;
-      const isRunning = dockerState.pendingAction === action;
-      button.disabled = isBusy;
-      button.classList.toggle("is-running", isRunning);
-      button.textContent = isRunning ? "执行中..." : label;
-    });
+    this.lastDeployFingerprint = null;
+    if (import.meta.env.DEV) MemoryMonitor.getInstance().logMemorySnapshot("DockerPage cleanup");
   }
 }
 
-/** 全局 Docker 页面实例 */
 export const dockerPage = new DockerPage();

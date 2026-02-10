@@ -6,7 +6,6 @@ import { systemState, appState } from "../state";
 import { systemService } from "../services";
 import { getMetricCard } from "../ui";
 import { getSystemTrendCardsHtml, updateSystemTrendWidgets } from "../modules/system-trend-view";
-import { getErrorBlock } from "../modules/shell-ui";
 import type { SystemSnapshot } from "../types";
 import {
   escapeHtml,
@@ -28,43 +27,70 @@ export class SystemPage {
    * 渲染 System 页面
    */
   async render(container: HTMLElement, renderEpoch?: number): Promise<void> {
+    const hasDashboard = container.querySelector("#system-dashboard") !== null;
+    const hasSnapshotCache = systemState.snapshotCache !== null;
+
+    if (!hasSnapshotCache && !hasDashboard) {
+      if (systemState.bootstrapStartedAt <= 0) {
+        systemState.bootstrapStartedAt = Date.now();
+      }
+      systemState.bootstrapStatus = "loading";
+      systemState.bootstrapError = null;
+      this.renderBootstrapState(container, {
+        kind: "loading",
+        title: "正在采集系统信息",
+        detail: "首次采样可能需要几秒，期间可继续操作其他页面。",
+      });
+    }
+
     const snapshotFresh = systemService.isSnapshotFresh();
 
     // 如果有缓存，立即显示
-    if (systemState.snapshotCache && !container.querySelector("#system-dashboard")) {
+    if (systemState.snapshotCache && !hasDashboard) {
       this.renderWithSnapshot(container, systemState.snapshotCache, 0);
       this.renderAnchoredUptimeIfVisible();
+      systemState.bootstrapStatus = snapshotFresh ? "ready" : "partial";
+      systemState.bootstrapError = snapshotFresh ? null : "当前使用缓存数据，后台正在同步最新指标";
     }
 
     if (snapshotFresh) {
+      systemState.bootstrapStatus = "ready";
+      systemState.bootstrapError = null;
+      systemState.bootstrapStartedAt = 0;
       return;
     }
 
     // 异步获取新数据（不阻塞UI）
     const response = await systemService.fetchSystemSnapshot();
     if (renderEpoch !== undefined && appState.isRenderStale(renderEpoch, "system")) {
-      const hasDashboard = container.querySelector("#system-dashboard") !== null;
-      if (!hasDashboard && appState.currentPage === "system") {
-        if (response.ok && response.data) {
-          this.renderWithSnapshot(container, response.data, response.elapsedMs);
-          this.renderAnchoredUptimeIfVisible();
-        } else if (systemState.snapshotCache) {
-          this.renderWithSnapshot(container, systemState.snapshotCache, 0);
-          this.renderAnchoredUptimeIfVisible();
-        } else {
-          container.innerHTML = getErrorBlock("系统信息获取失败", response.error ?? "未知错误");
-        }
-      }
       return;
     }
+
     if (!response.ok || !response.data) {
+      const errorMessage = response.error ?? "未知错误";
+
       // 如果有缓存，保持显示缓存；否则显示错误
-      if (!systemState.snapshotCache) {
-        container.innerHTML = getErrorBlock("系统信息获取失败", response.error ?? "未知错误");
+      if (systemState.snapshotCache) {
+        this.renderWithSnapshot(container, systemState.snapshotCache, 0);
+        this.renderAnchoredUptimeIfVisible();
+        systemState.bootstrapStatus = "partial";
+        systemState.bootstrapError = errorMessage;
+      } else {
+        systemState.bootstrapStatus = "error";
+        systemState.bootstrapError = errorMessage;
+        this.renderBootstrapState(container, {
+          kind: "error",
+          title: "系统信息获取失败",
+          detail: errorMessage,
+          showRetry: true,
+        });
       }
       return;
     }
 
+    systemState.bootstrapStatus = "ready";
+    systemState.bootstrapError = null;
+    systemState.bootstrapStartedAt = 0;
     this.renderWithSnapshot(container, response.data, response.elapsedMs);
     this.renderAnchoredUptimeIfVisible();
   }
@@ -181,7 +207,7 @@ export class SystemPage {
         </div>
       </div>
 
-      <div class="grid grid-cols-3 gap-4">${diskBlocks}</div>
+      <div id="disk-grid" class="grid grid-cols-3 gap-4">${diskBlocks}</div>
     </div>
   `;
 
@@ -252,6 +278,97 @@ export class SystemPage {
     }
 
     updateSystemTrendWidgets(container, systemState.trendState, cpuUsagePercent, memoryUsagePercent);
+
+    // 缓存有完整数据后移除加载占位符、回填磁盘
+    this.tryPatchOverviewLoading(container);
+    this.tryPatchDiskSection(container);
+  }
+
+  /**
+   * 精确采样到达后移除"正在获取完整系统信息"加载提示并补全概览数据
+   */
+  private tryPatchOverviewLoading(container: HTMLElement): void {
+    const snapshot = systemState.snapshotCache;
+    if (!snapshot || this.shouldShowOverviewLoading(snapshot)) {
+      return;
+    }
+
+    const loadingEl = container.querySelector<HTMLElement>(".system-overview-loading");
+    if (!loadingEl) {
+      return; // 已经补全过了
+    }
+
+    loadingEl.remove();
+
+    // 补全概览卡片中所有占位字段
+    const patchMap: Record<string, string> = {
+      "版本": `${escapeHtml(snapshot.osVersion || "未知")}${snapshot.buildNumber ? ` (build ${escapeHtml(snapshot.buildNumber)})` : ""}`,
+      "CPU": escapeHtml(snapshot.cpuModel || "未知"),
+      "CPU 核心": this.buildCpuTopologyText(snapshot),
+    };
+
+    const overviewRows = container.querySelectorAll<HTMLElement>(".card.col-span-2 .space-y-3 .flex.justify-between");
+    for (const row of overviewRows) {
+      const label = row.querySelector(".text-text-secondary")?.textContent?.trim();
+      if (!label) continue;
+
+      const newValue = patchMap[label];
+      if (newValue === undefined) continue;
+
+      const valueEl = row.querySelector(".text-text-primary");
+      if (valueEl && (valueEl.textContent?.includes("未知") || valueEl.textContent?.includes("采集中"))) {
+        valueEl.innerHTML = newValue;
+      }
+    }
+  }
+
+  /**
+   * 磁盘数据回填：缓存已有磁盘数据但页面仍显示占位符时，局部更新磁盘区域
+   */
+  private tryPatchDiskSection(container: HTMLElement): void {
+    const disks = systemState.snapshotCache?.disks;
+    if (!disks || disks.length === 0) {
+      return;
+    }
+
+    const diskGrid = container.querySelector<HTMLElement>("#disk-grid");
+    if (!diskGrid) {
+      return;
+    }
+
+    // 已经渲染过真实磁盘卡片则跳过
+    if (diskGrid.children.length > 1 || !diskGrid.textContent?.includes("采集中")) {
+      return;
+    }
+
+    // 更新磁盘指标卡片
+    const metricValues = container.querySelectorAll<HTMLElement>(".metric-card .metric-value");
+    const metricSubtitles = container.querySelectorAll<HTMLElement>(".metric-card .text-xs");
+    if (metricValues.length >= 3) {
+      metricValues[2].textContent = String(disks.length);
+    }
+    if (metricSubtitles.length >= 3) {
+      metricSubtitles[2].textContent = "已挂载";
+    }
+
+    // 更新磁盘详情网格
+    diskGrid.innerHTML = disks
+      .map((disk: any) => `
+        <div class="card animate-fade-in">
+          <div class="flex items-center justify-between mb-3">
+            <h4 class="font-semibold text-text-primary">磁盘 ${escapeHtml(disk.name)}</h4>
+            <span class="badge ${getBadgeClassByUsage(disk.usagePercent)}">${formatPercent(disk.usagePercent)}</span>
+          </div>
+          <div class="space-y-2 text-sm">
+            <div class="flex justify-between"><span class="text-text-secondary">挂载点</span><span class="text-text-primary">${escapeHtml(disk.mountPoint)}</span></div>
+            <div class="flex justify-between"><span class="text-text-secondary">总容量</span><span class="text-text-primary">${formatGb(disk.totalGb)}</span></div>
+            <div class="flex justify-between"><span class="text-text-secondary">已使用</span><span class="text-text-primary">${formatGb(disk.usedGb)}</span></div>
+            <div class="w-full bg-bg-tertiary rounded-full h-2 mt-2">
+              <div class="h-2 rounded-full ${getProgressColorClass(disk.usagePercent)}" style="width: ${Math.min(100, Math.max(0, disk.usagePercent))}%"></div>
+            </div>
+          </div>
+        </div>`)
+      .join("");
   }
 
   /**
@@ -351,6 +468,36 @@ export class SystemPage {
     }
 
     return modal;
+  }
+
+  private renderBootstrapState(
+    container: HTMLElement,
+    options: {
+      kind: "loading" | "error";
+      title: string;
+      detail: string;
+      showRetry?: boolean;
+    }
+  ): void {
+    const kindClass = options.kind === "error" ? "is-error" : "is-loading";
+    const retryButton = options.showRetry
+      ? '<button id="system-retry-btn" type="button" class="btn btn-primary system-bootstrap-retry">立即重试</button>'
+      : "";
+
+    container.innerHTML = `
+      <div id="system-bootstrap-state" class="card animate-fade-in system-bootstrap-state ${kindClass}" data-bootstrap-kind="${escapeHtml(
+        options.kind
+      )}">
+        <div class="system-bootstrap-head">
+          <span class="system-bootstrap-indicator" aria-hidden="true"></span>
+          <h3 class="text-lg font-semibold text-text-primary">${escapeHtml(options.title)}</h3>
+        </div>
+        <p class="system-bootstrap-detail text-sm text-text-secondary">${escapeHtml(options.detail)}</p>
+        <div class="system-bootstrap-actions">
+          ${retryButton}
+        </div>
+      </div>
+    `;
   }
 
   private shouldShowOverviewLoading(snapshot: SystemSnapshot): boolean {

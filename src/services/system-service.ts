@@ -298,9 +298,20 @@ export class SystemService {
       return;
     }
 
-    systemState.uptimeTickTimer = window.setInterval(() => {
-      onTick();
-    }, 1000);
+    const scheduleNextTick = () => {
+      const now = Date.now();
+      const delay = 1000 - (now % 1000) || 1000;
+
+      systemState.uptimeTickTimer = window.setTimeout(() => {
+        onTick();
+
+        if (systemState.uptimeTickTimer !== null) {
+          scheduleNextTick();
+        }
+      }, delay);
+    };
+
+    scheduleNextTick();
   }
 
   /**
@@ -308,7 +319,7 @@ export class SystemService {
    */
   stopUptimeTicker(): void {
     if (systemState.uptimeTickTimer !== null) {
-      window.clearInterval(systemState.uptimeTickTimer);
+      window.clearTimeout(systemState.uptimeTickTimer);
       systemState.uptimeTickTimer = null;
     }
   }

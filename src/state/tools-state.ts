@@ -1,4 +1,5 @@
-import type { ToolStatus, ToolFilterState } from "../types";
+import type { ToolStatus, ToolFilterState, InstallFeedbackLevel } from "../types";
+import { TOOLS_SCAN_SOFT_TIMEOUT_MS } from "../constants/config";
 
 /**
  * Tools 页面状态管理
@@ -23,11 +24,32 @@ export class ToolsState {
   /** 正在安装的工具 Key */
   installingKey: string | null = null;
 
+  /** 正在卸载的工具 Key */
+  uninstallingKey: string | null = null;
+
   /** 安装日志 */
   installLog = "等待安装任务...";
 
   /** 安装状态文本 */
   installState = "";
+
+  /** 安装进度（0-100） */
+  installProgress = 0;
+
+  /** 安装进度说明 */
+  installMessage = "待命中";
+
+  /** 安装反馈等级 */
+  installFeedbackLevel: InstallFeedbackLevel = "idle";
+
+  /** 安装反馈标题 */
+  installFeedbackTitle = "";
+
+  /** 安装反馈详情 */
+  installFeedbackDetail = "";
+
+  /** 当前安装进度动画定时器 */
+  installProgressTimer: number | null = null;
 
   /** 最后扫描时间戳（ms） */
   lastScanAt = 0;
@@ -43,6 +65,24 @@ export class ToolsState {
 
   /** 工具刷新中标志 */
   refreshing = false;
+
+  /** 最近一次刷新错误信息 */
+  lastRefreshError: string | null = null;
+
+  /** 最近一次刷新错误时间戳（ms） */
+  lastRefreshErrorAt = 0;
+
+  /** 连续刷新失败次数 */
+  refreshFailCount = 0;
+
+  /** 扫描开始时间戳（ms） */
+  scanStartedAt = 0;
+
+  /** 扫描软超时是否已触发 */
+  scanSoftTimeoutActive = false;
+
+  /** 扫描软超时阈值（ms） */
+  scanSoftTimeoutMs = TOOLS_SCAN_SOFT_TIMEOUT_MS;
 
   /** 工具网格渲染令牌（用于取消过期渲染） */
   gridRenderToken = 0;
@@ -65,6 +105,11 @@ export class ToolsState {
     if (this.autoRefreshTimer !== null) {
       window.clearTimeout(this.autoRefreshTimer);
       this.autoRefreshTimer = null;
+    }
+
+    if (this.installProgressTimer !== null) {
+      window.clearTimeout(this.installProgressTimer);
+      this.installProgressTimer = null;
     }
   }
 

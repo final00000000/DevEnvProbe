@@ -22,14 +22,17 @@ import {
 } from "./core";
 import {
   ensureShellRuntimeStyles,
-  initThemeToggle,
   initRefreshButton,
-  loadThemePreference,
   getSettingsContent,
-  bindSettingsActions,
   getErrorBlock,
   showLoading,
 } from "./modules/shell-ui";
+import {
+  applyTheme,
+  bindThemeSettingsPanel,
+  loadPersistedTheme,
+  migrateLegacyThemeState,
+} from "./modules/theme";
 import {
   SYSTEM_INITIAL_LOADING_RETRY_MAX,
   SYSTEM_INITIAL_LOADING_WATCHDOG_MS,
@@ -65,16 +68,26 @@ function armSystemLoadingWatchdog(renderEpoch: number): void {
     }
 
     const hasDashboard = container.querySelector("#system-dashboard") !== null;
+    const hasBootstrapState = container.querySelector("#system-bootstrap-state") !== null;
+    const hasBootstrapError = container.querySelector('#system-bootstrap-state[data-bootstrap-kind="error"]') !== null;
+
     if (hasDashboard || systemState.snapshotCache !== null) {
       clearSystemLoadingWatchdog(true);
       return;
     }
 
+    if (hasBootstrapError) {
+      clearSystemLoadingWatchdog(false);
+      return;
+    }
+
     if (systemLoadingRetryBudget <= 0) {
-      showLoading(container, "系统信息采集中，请稍候...", {
-        loadingId: "system-loading-panel",
-        hint: "采集耗时较长时将自动继续重试，无需手动刷新。",
-      });
+      if (!hasBootstrapState) {
+        showLoading(container, "系统信息采集中，请稍候...", {
+          loadingId: "system-loading-panel",
+          hint: "采集耗时较长时将自动继续重试，无需手动刷新。",
+        });
+      }
       return;
     }
 
@@ -105,11 +118,21 @@ window.addEventListener("DOMContentLoaded", () => {
       }
     })
   );
-  initThemeToggle();
+  migrateLegacyThemeState();
+  applyTheme(loadPersistedTheme());
   initRefreshButton(async () => {
+    if (appState.currentPage === "system") {
+      await refreshSystemPageIfVisible();
+      return;
+    }
+
+    if (appState.currentPage === "docker") {
+      await dockerPage.refreshOverview("quick");
+      return;
+    }
+
     await renderCurrentPage({ allowDomReuse: false });
   });
-  loadThemePreference();
   initLifecycleEvents(() => scheduleResumeRefresh(onResumeRefresh));
 
   void renderCurrentPage();
@@ -175,6 +198,7 @@ async function renderCurrentPage(options: RenderPageOptions = {}): Promise<void>
   if (targetPage === "system") {
     try {
       await systemPage.render(contentEl, renderEpoch);
+      bindSystemRetryButton(contentEl);
     } catch (error) {
       if (!appState.isRenderStale(renderEpoch, "system")) {
         contentEl.innerHTML = getErrorBlock("系统首页渲染失败", String(error));
@@ -182,7 +206,11 @@ async function renderCurrentPage(options: RenderPageOptions = {}): Promise<void>
       return;
     }
 
-    if (!contentEl.querySelector("#system-dashboard") && appState.currentPage === "system") {
+    const hasDashboard = contentEl.querySelector("#system-dashboard") !== null;
+    const hasBootstrapState = contentEl.querySelector("#system-bootstrap-state") !== null;
+    const hasBootstrapError = contentEl.querySelector('#system-bootstrap-state[data-bootstrap-kind="error"]') !== null;
+
+    if (!hasDashboard && !hasBootstrapState && appState.currentPage === "system") {
       const detail = systemState.snapshotCache === null
         ? "首次采集耗时较长，正在后台持续重试..."
         : "当前使用缓存数据，后台正在继续同步最新指标。";
@@ -192,7 +220,7 @@ async function renderCurrentPage(options: RenderPageOptions = {}): Promise<void>
       });
     }
 
-    if (contentEl.querySelector("#system-dashboard") || systemState.snapshotCache !== null) {
+    if (hasDashboard || systemState.snapshotCache !== null || hasBootstrapError) {
       clearSystemLoadingWatchdog(true);
     }
 
@@ -215,7 +243,7 @@ async function renderCurrentPage(options: RenderPageOptions = {}): Promise<void>
   }
 
   contentEl.innerHTML = getSettingsContent();
-  bindSettingsActions();
+  bindThemeSettingsPanel(contentEl);
 }
 
 // ==================== 系统自动刷新 ====================
@@ -250,14 +278,26 @@ async function refreshSystemPageIfVisible(): Promise<void> {
   const renderEpoch = appState.pageRenderEpoch;
   systemState.refreshInFlight = true;
   try {
-    const shouldUsePartialRefresh = container.querySelector("#system-dashboard") !== null && systemService.isSnapshotFresh();
+    const hasDashboard = container.querySelector("#system-dashboard") !== null;
 
-    if (shouldUsePartialRefresh) {
+    if (hasDashboard) {
       await systemPage.refreshPartial(container, renderEpoch);
+
+      if (!systemService.isSnapshotFresh()) {
+        void systemService.fetchSystemSnapshot().then((snapshotResp) => {
+          if (appState.isRenderStale(renderEpoch, "system")) return;
+          if (snapshotResp.ok && snapshotResp.data) {
+            systemPage.render(container, renderEpoch);
+          }
+        }).catch(() => {});
+      }
     } else {
       await systemPage.render(container, renderEpoch);
+      bindSystemRetryButton(container);
     }
-    if (container.querySelector("#system-dashboard") || systemState.snapshotCache !== null) {
+
+    const hasBootstrapError = container.querySelector('#system-bootstrap-state[data-bootstrap-kind="error"]') !== null;
+    if (container.querySelector("#system-dashboard") || systemState.snapshotCache !== null || hasBootstrapError) {
       clearSystemLoadingWatchdog(true);
     }
   } catch (error) {
@@ -267,6 +307,27 @@ async function refreshSystemPageIfVisible(): Promise<void> {
   } finally {
     systemState.refreshInFlight = false;
   }
+}
+
+function bindSystemRetryButton(container: ParentNode): void {
+  const retryBtn = container.querySelector<HTMLButtonElement>("#system-retry-btn");
+  if (!retryBtn || retryBtn.dataset.bound === "true") {
+    return;
+  }
+
+  retryBtn.addEventListener("click", async () => {
+    retryBtn.disabled = true;
+    retryBtn.textContent = "重试中...";
+
+    try {
+      await refreshSystemPageIfVisible();
+    } finally {
+      retryBtn.disabled = false;
+      retryBtn.textContent = "立即重试";
+    }
+  });
+
+  retryBtn.dataset.bound = "true";
 }
 
 // ==================== 恢复刷新处理 ====================
@@ -283,4 +344,3 @@ function onResumeRefresh(): void {
     // Tools 页面自动刷新由页面内部管理
   }
 }
-

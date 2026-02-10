@@ -107,4 +107,25 @@ describe('SystemPage', () => {
     const modal = document.getElementById('cpu-sampling-modal');
     expect(modal?.classList.contains('is-open')).toBe(true);
   });
+
+  it('首次采集失败时应渲染可重试错误态', async () => {
+    const page = new SystemPage();
+    const container = document.createElement('div');
+
+    vi.spyOn(systemService, 'isSnapshotFresh').mockReturnValue(false);
+    vi.spyOn(systemService, 'fetchSystemSnapshot').mockResolvedValue({
+      ok: false,
+      data: null,
+      error: 'snapshot timeout',
+      elapsedMs: 2200,
+    });
+
+    await page.render(container, 0);
+
+    const bootstrap = container.querySelector('#system-bootstrap-state') as HTMLElement | null;
+    expect(bootstrap).not.toBeNull();
+    expect(bootstrap?.dataset.bootstrapKind).toBe('error');
+    expect(container.querySelector('#system-retry-btn')).not.toBeNull();
+    expect(container.textContent).toContain('系统信息获取失败');
+  });
 });

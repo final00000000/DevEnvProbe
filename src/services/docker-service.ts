@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CommandResponse, DockerCommandResult } from "../types";
+import type { CommandResponse, DockerActionType, DockerCommandResult } from "../types";
 import { dockerState } from "../state";
 import { DOCKER_OVERVIEW_REFRESH_TTL_MS } from "../constants/config";
 import {
@@ -28,7 +28,7 @@ export class DockerService {
   /**
    * 执行 Docker 命令
    */
-  async runDockerAction(action: string, target?: string): Promise<CommandResponse<DockerCommandResult>> {
+  async runDockerAction(action: DockerActionType, target?: string): Promise<CommandResponse<DockerCommandResult>> {
     return await invoke<CommandResponse<DockerCommandResult>>("run_docker_action", {
       action,
       target,

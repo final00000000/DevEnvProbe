@@ -29,6 +29,9 @@ export const TOOLS_GRID_BATCH_SIZE = 12;
 /** 工具扫描缓存有效期（2分钟） */
 export const TOOLS_CACHE_TTL_MS = 120000;
 
+/** 环境市场扫描软超时（ms） */
+export const TOOLS_SCAN_SOFT_TIMEOUT_MS = 2000;
+
 // ==================== 防抖延迟配置 ====================
 /** 工具搜索防抖延迟（ms） */
 export const TOOL_SEARCH_DEBOUNCE_MS = 120;

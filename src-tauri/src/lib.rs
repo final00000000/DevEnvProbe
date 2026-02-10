@@ -1,7 +1,7 @@
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -9,7 +9,7 @@ use tauri::{AppHandle, LogicalSize, Manager, Size};
 
 mod process_runner;
 
-use process_runner::{execute_process_with_timeout, run_command_with_timeout};
+use process_runner::{execute_process_with_timeout, execute_process_with_timeout_in_dir, run_command_with_timeout};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,6 +78,7 @@ struct ToolStatus {
     version: Option<String>,
     details: Option<String>,
     install_key: Option<String>,
+    install_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,9 +91,86 @@ struct DockerCommandResult {
     exit_code: i32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeployStepRequest {
+    profile: DeployProfile,
+    step: String,
+    selected_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeployProfile {
+    id: String,
+    name: String,
+    mode: String,
+    git: DeployGitConfig,
+    compose: DeployComposeConfig,
+    run: DeployRunConfig,
+    created_at: u64,
+    updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeployGitConfig {
+    enabled: bool,
+    remote: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeployComposeConfig {
+    project_path: String,
+    compose_file: String,
+    service: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeployRunConfig {
+    param_mode: String,
+    container_name: String,
+    image_ref: String,
+    image_source: String,
+    build_context: String,
+    dockerfile: String,
+    image_tag: String,
+    ports_text: String,
+    env_text: String,
+    volumes_text: String,
+    restart_policy: String,
+    extra_args: String,
+    template_args: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeployStepResult {
+    step: String,
+    ok: bool,
+    skipped: bool,
+    commands: Vec<String>,
+    output: String,
+    error: Option<String>,
+    elapsed_ms: u128,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct InstallResult {
+    item_key: String,
+    package_id: String,
+    command: String,
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UninstallResult {
     item_key: String,
     package_id: String,
     command: String,
@@ -115,11 +193,21 @@ struct InstallSpec {
     package_id: &'static str,
 }
 
+#[derive(Clone)]
+struct InstallExecutionPlan {
+    command: String,
+    args: Vec<String>,
+    package_id: String,
+}
+
 const SYSTEM_QUICK_TIMEOUT_MS: u64 = 1_200;
 const SYSTEM_PRECISE_TIMEOUT_MS: u64 = 4_000;
 const TOOL_DETECT_TIMEOUT_MS: u64 = 1_000;
+const AI_TOOL_DETECT_TIMEOUT_MS: u64 = 3_000;
 const DOCKER_ACTION_TIMEOUT_MS: u64 = 10_000;
 const DOCKER_BATCH_TIMEOUT_MS: u64 = 25_000;
+const DEPLOY_GIT_TIMEOUT_MS: u64 = 90_000;
+const DEPLOY_DOCKER_TIMEOUT_MS: u64 = 120_000;
 const WINGET_INSTALL_TIMEOUT_MS: u64 = 20 * 60 * 1_000;
 
 #[derive(Debug, Default)]
@@ -296,6 +384,16 @@ async fn get_docker_overview_batch(mode: String) -> CommandResponse<Vec<DockerCo
 }
 
 #[tauri::command]
+async fn list_git_branches(project_path: String) -> CommandResponse<Vec<String>> {
+    with_timing_async(async move { run_blocking(move || list_git_branches_internal(&project_path)).await }).await
+}
+
+#[tauri::command]
+async fn execute_deploy_step(request: DeployStepRequest) -> CommandResponse<DeployStepResult> {
+    with_timing_async(async move { run_blocking(move || execute_deploy_step_internal(&request)).await }).await
+}
+
+#[tauri::command]
 async fn install_market_item(item_key: String, install_path: Option<String>) -> CommandResponse<InstallResult> {
     with_timing_async(async move {
         run_blocking(move || execute_install_item(&item_key, install_path.as_deref())).await
@@ -304,8 +402,21 @@ async fn install_market_item(item_key: String, install_path: Option<String>) -> 
 }
 
 #[tauri::command]
+async fn uninstall_market_item(item_key: String) -> CommandResponse<UninstallResult> {
+    with_timing_async(async move {
+        run_blocking(move || execute_uninstall_item(&item_key)).await
+    })
+    .await
+}
+
+#[tauri::command]
 async fn pick_install_directory() -> CommandResponse<Option<String>> {
     with_timing_async(async { run_blocking(select_install_directory).await }).await
+}
+
+#[tauri::command]
+async fn pick_project_directory() -> CommandResponse<Option<String>> {
+    with_timing_async(async { run_blocking(select_project_directory).await }).await
 }
 
 async fn with_timing_async<T, Fut>(operation: Fut) -> CommandResponse<T>
@@ -870,6 +981,28 @@ fn default_tool_specs() -> Vec<ToolSpec> {
             category: "Database",
             install_key: Some("redis"),
         },
+        // ── AI ──
+        ToolSpec {
+            name: "Claude Code",
+            command: "claude",
+            args: &["--version"],
+            category: "AI",
+            install_key: Some("claude-code"),
+        },
+        ToolSpec {
+            name: "Codex CLI",
+            command: "codex",
+            args: &["--version"],
+            category: "AI",
+            install_key: Some("codex-cli"),
+        },
+        ToolSpec {
+            name: "Gemini CLI",
+            command: "gemini",
+            args: &["--version"],
+            category: "AI",
+            install_key: Some("gemini-cli"),
+        },
     ]
 }
 
@@ -1019,12 +1152,39 @@ fn install_specs() -> Vec<InstallSpec> {
             key: "redis",
             package_id: "Redis.Redis",
         },
+        // ── AI ──
+        InstallSpec {
+            key: "claude-code",
+            package_id: "@anthropic-ai/claude-code",
+        },
+        InstallSpec {
+            key: "codex-cli",
+            package_id: "@openai/codex",
+        },
+        InstallSpec {
+            key: "gemini-cli",
+            package_id: "@google/gemini-cli",
+        },
     ]
+}
+
+fn resolve_tool_path(command: &str) -> Option<String> {
+    let args = vec![command.to_string()];
+    let result = execute_process_with_timeout("where", &args, TOOL_DETECT_TIMEOUT_MS).ok()?;
+    if result.exit_code != 0 {
+        return None;
+    }
+    first_line(&result.stdout)
 }
 
 fn detect_tool(spec: &ToolSpec) -> ToolStatus {
     let args: Vec<String> = spec.args.iter().map(|arg| (*arg).to_string()).collect();
-    let result = execute_process_with_timeout(spec.command, &args, TOOL_DETECT_TIMEOUT_MS);
+    let timeout = if spec.category == "AI" {
+        AI_TOOL_DETECT_TIMEOUT_MS
+    } else {
+        TOOL_DETECT_TIMEOUT_MS
+    };
+    let result = execute_process_with_timeout(spec.command, &args, timeout);
 
     match result {
         Ok(output) => {
@@ -1036,22 +1196,40 @@ fn detect_tool(spec: &ToolSpec) -> ToolStatus {
                 stderr.clone()
             };
 
+            let installed = output.exit_code == 0
+                || (output.exit_code == process_runner::TIMEOUT_EXIT_CODE
+                    && first_line(&raw).is_some());
+            let details = if installed {
+                None
+            } else {
+                // 检查是否是"命令未找到"类的错误
+                let is_command_not_found = is_missing_command_detail(&stderr)
+                    || stderr.contains("不是内部或外部命令")
+                    || stderr.contains("系统找不到指定的文件")
+                    || stderr.to_lowercase().contains("not recognized")
+                    || stderr.to_lowercase().contains("command not found");
+
+                if is_command_not_found {
+                    // 将技术性错误转换为友好提示（不隐藏错误，只是优化表达）
+                    Some("未检测到该命令，可能未安装或未配置到系统环境变量".to_string())
+                } else if !stderr.is_empty() {
+                    // 其他类型的错误，显示详情以便调试
+                    Some(format!("返回码 {}，{}", output.exit_code, &stderr))
+                } else {
+                    // 没有错误输出但返回码非0
+                    Some(format!("命令执行失败（返回码 {}）", output.exit_code))
+                }
+            };
+
             ToolStatus {
                 name: spec.name.to_string(),
                 command: spec.command.to_string(),
                 category: spec.category.to_string(),
-                installed: output.exit_code == 0,
-                version: first_line(&raw),
-                details: if output.exit_code == 0 {
-                    None
-                } else {
-                    Some(format!(
-                        "返回码 {}，{}",
-                        output.exit_code,
-                        if stderr.is_empty() { "无错误输出" } else { &stderr }
-                    ))
-                },
+                installed,
+                version: if installed { first_line(&raw) } else { None },
+                details,
                 install_key: spec.install_key.map(ToString::to_string),
+                install_path: if installed { resolve_tool_path(spec.command) } else { None },
             }
         }
         Err(error) => detect_tool_with_fallback(spec, error),
@@ -1083,6 +1261,7 @@ fn detect_tool_with_fallback(spec: &ToolSpec, detect_error: String) -> ToolStatu
                 version,
                 details: Some(format!("检测路径：{}", path)),
                 install_key: spec.install_key.map(ToString::to_string),
+                install_path: Some(path),
             };
         }
     }
@@ -1097,6 +1276,7 @@ fn detect_tool_with_fallback(spec: &ToolSpec, detect_error: String) -> ToolStatu
                 version: Some("通过服务检测到已安装".to_string()),
                 details: Some(format!("检测到服务：{}", service)),
                 install_key: spec.install_key.map(ToString::to_string),
+                install_path: resolve_tool_path(spec.command),
             };
         }
     }
@@ -1111,9 +1291,25 @@ fn detect_tool_with_fallback(spec: &ToolSpec, detect_error: String) -> ToolStatu
                 version: Some("通过服务检测到已安装".to_string()),
                 details: Some(format!("检测到服务：{}", service)),
                 install_key: spec.install_key.map(ToString::to_string),
+                install_path: resolve_tool_path(spec.command),
             };
         }
     }
+
+    // 检查是否是"命令未找到"类错误
+    let is_command_not_found = is_missing_command_detail(&detect_error)
+        || detect_error.contains("不是内部或外部命令")
+        || detect_error.contains("系统找不到指定的文件")
+        || detect_error.to_lowercase().contains("not recognized")
+        || detect_error.to_lowercase().contains("command not found");
+
+    let details = if is_command_not_found {
+        // 将技术性错误转换为友好提示（不隐藏错误，只是优化表达）
+        Some("未检测到该命令，可能未安装或未配置到系统环境变量".to_string())
+    } else {
+        // 其他类型的错误，保留原始错误信息
+        Some(detect_error)
+    };
 
     ToolStatus {
         name: spec.name.to_string(),
@@ -1121,8 +1317,9 @@ fn detect_tool_with_fallback(spec: &ToolSpec, detect_error: String) -> ToolStatu
         category: spec.category.to_string(),
         installed: false,
         version: None,
-        details: Some(detect_error),
+        details,
         install_key: spec.install_key.map(ToString::to_string),
+        install_path: None,
     }
 }
 
@@ -1246,61 +1443,719 @@ fn execute_docker_overview_batch(mode: &str) -> Result<Vec<DockerCommandResult>,
     Ok(results)
 }
 
+fn list_git_branches_internal(project_path: &str) -> Result<Vec<String>, String> {
+    let directory = ensure_existing_dir(project_path, "Git 项目目录")?;
+    let args = vec!["branch".to_string(), "--format=%(refname:short)".to_string()];
+    let capture = execute_process_with_timeout_in_dir("git", &args, DEPLOY_GIT_TIMEOUT_MS, Some(&directory))?;
+
+    if capture.exit_code != 0 {
+        return Err(format!(
+            "获取 Git 分支失败（{}）：{}",
+            capture.exit_code,
+            prefer_error_output(&capture)
+        ));
+    }
+
+    let mut branches = split_non_empty_lines(&capture.stdout);
+    if branches.is_empty() {
+        let current_args = vec!["rev-parse".to_string(), "--abbrev-ref".to_string(), "HEAD".to_string()];
+        let current = execute_process_with_timeout_in_dir("git", &current_args, DEPLOY_GIT_TIMEOUT_MS, Some(&directory))?;
+        if current.exit_code == 0 {
+            branches = split_non_empty_lines(&current.stdout);
+        }
+    }
+
+    branches.sort();
+    branches.dedup();
+    Ok(branches)
+}
+
+fn execute_deploy_step_internal(request: &DeployStepRequest) -> Result<DeployStepResult, String> {
+    match request.step.as_str() {
+        "pull_code" => execute_pull_code_step(request),
+        "stop_old" => execute_stop_old_step(request),
+        "deploy_new" => execute_deploy_new_step(request),
+        _ => Err(format!("未支持的部署步骤: {}", request.step)),
+    }
+}
+
+fn execute_pull_code_step(request: &DeployStepRequest) -> Result<DeployStepResult, String> {
+    let started_at = Instant::now();
+    let mut commands: Vec<String> = Vec::new();
+    let mut outputs: Vec<String> = Vec::new();
+
+    if !request.profile.git.enabled {
+        return Ok(build_deploy_step_result(
+            "pull_code",
+            true,
+            true,
+            commands,
+            "已禁用代码拉取，步骤跳过。".to_string(),
+            None,
+            started_at,
+        ));
+    }
+
+    let branch = request
+        .selected_branch
+        .as_deref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "未选择分支，无法执行代码拉取。".to_string())?;
+
+    if !is_safe_git_ref(branch) {
+        return Err("分支名称包含非法字符。".to_string());
+    }
+
+    let project_path = resolve_deploy_project_path(&request.profile)?;
+    let project_dir = ensure_existing_dir(&project_path, "拉取代码目录")?;
+    let remote = normalize_remote_name(&request.profile.git.remote);
+
+    let fetch_args = vec!["fetch".to_string(), "--prune".to_string(), remote.clone()];
+    let fetch = run_deploy_command("git", &fetch_args, DEPLOY_GIT_TIMEOUT_MS, Some(&project_dir), &mut commands)?;
+    outputs.push(format_command_output("git", &fetch_args, &fetch));
+    if fetch.exit_code != 0 {
+        return Ok(build_deploy_step_result(
+            "pull_code",
+            false,
+            false,
+            commands,
+            outputs.join("\n\n"),
+            Some(prefer_error_output(&fetch)),
+            started_at,
+        ));
+    }
+
+    let checkout_args = vec!["checkout".to_string(), branch.to_string()];
+    let checkout = run_deploy_command("git", &checkout_args, DEPLOY_GIT_TIMEOUT_MS, Some(&project_dir), &mut commands)?;
+    outputs.push(format_command_output("git", &checkout_args, &checkout));
+    if checkout.exit_code != 0 {
+        return Ok(build_deploy_step_result(
+            "pull_code",
+            false,
+            false,
+            commands,
+            outputs.join("\n\n"),
+            Some(prefer_error_output(&checkout)),
+            started_at,
+        ));
+    }
+
+    let pull_args = vec![
+        "pull".to_string(),
+        "--ff-only".to_string(),
+        remote,
+        branch.to_string(),
+    ];
+    let pull = run_deploy_command("git", &pull_args, DEPLOY_GIT_TIMEOUT_MS, Some(&project_dir), &mut commands)?;
+    outputs.push(format_command_output("git", &pull_args, &pull));
+
+    Ok(build_deploy_step_result(
+        "pull_code",
+        pull.exit_code == 0,
+        false,
+        commands,
+        outputs.join("\n\n"),
+        if pull.exit_code == 0 {
+            None
+        } else {
+            Some(prefer_error_output(&pull))
+        },
+        started_at,
+    ))
+}
+
+fn execute_stop_old_step(request: &DeployStepRequest) -> Result<DeployStepResult, String> {
+    let started_at = Instant::now();
+    let mut commands: Vec<String> = Vec::new();
+
+    if request.profile.mode == "compose" {
+        let project_path = resolve_deploy_project_path(&request.profile)?;
+        let project_dir = ensure_existing_dir(&project_path, "Compose 项目目录")?;
+        let args = build_compose_stop_args(&request.profile);
+        let capture = run_deploy_command("docker", &args, DEPLOY_DOCKER_TIMEOUT_MS, Some(&project_dir), &mut commands)?;
+
+        return Ok(build_deploy_step_result(
+            "stop_old",
+            capture.exit_code == 0,
+            false,
+            commands,
+            format_command_output("docker", &args, &capture),
+            if capture.exit_code == 0 {
+                None
+            } else {
+                Some(prefer_error_output(&capture))
+            },
+            started_at,
+        ));
+    }
+
+    let container_name = request.profile.run.container_name.trim();
+    if !is_safe_identifier(container_name) {
+        return Err("Run 模式容器名称不合法。".to_string());
+    }
+
+    let args = vec!["rm".to_string(), "-f".to_string(), container_name.to_string()];
+    let capture = run_deploy_command("docker", &args, DEPLOY_DOCKER_TIMEOUT_MS, None, &mut commands)?;
+    let combined = prefer_error_output(&capture).to_lowercase();
+    let missing_container = combined.contains("no such container") || combined.contains("not found") || combined.contains("找不到");
+
+    if capture.exit_code != 0 && missing_container {
+        return Ok(build_deploy_step_result(
+            "stop_old",
+            true,
+            true,
+            commands,
+            format_command_output("docker", &args, &capture),
+            None,
+            started_at,
+        ));
+    }
+
+    Ok(build_deploy_step_result(
+        "stop_old",
+        capture.exit_code == 0,
+        false,
+        commands,
+        format_command_output("docker", &args, &capture),
+        if capture.exit_code == 0 {
+            None
+        } else {
+            Some(prefer_error_output(&capture))
+        },
+        started_at,
+    ))
+}
+
+fn execute_deploy_new_step(request: &DeployStepRequest) -> Result<DeployStepResult, String> {
+    let started_at = Instant::now();
+    let mut commands: Vec<String> = Vec::new();
+    let mut outputs: Vec<String> = Vec::new();
+
+    if request.profile.mode == "compose" {
+        let project_path = resolve_deploy_project_path(&request.profile)?;
+        let project_dir = ensure_existing_dir(&project_path, "Compose 项目目录")?;
+        let args = build_compose_up_args(&request.profile);
+        let capture = run_deploy_command("docker", &args, DEPLOY_DOCKER_TIMEOUT_MS, Some(&project_dir), &mut commands)?;
+        outputs.push(format_command_output("docker", &args, &capture));
+
+        return Ok(build_deploy_step_result(
+            "deploy_new",
+            capture.exit_code == 0,
+            false,
+            commands,
+            outputs.join("\n\n"),
+            if capture.exit_code == 0 {
+                None
+            } else {
+                Some(prefer_error_output(&capture))
+            },
+            started_at,
+        ));
+    }
+
+    let image_ref = resolve_run_image_ref(&request.profile)?;
+
+    if request.profile.run.image_source == "pull" {
+        let pull_args = build_run_image_pull_args(&image_ref)?;
+        let pull_capture = run_deploy_command("docker", &pull_args, DEPLOY_DOCKER_TIMEOUT_MS, None, &mut commands)?;
+        outputs.push(format_command_output("docker", &pull_args, &pull_capture));
+        if pull_capture.exit_code != 0 {
+            return Ok(build_deploy_step_result(
+                "deploy_new",
+                false,
+                false,
+                commands,
+                outputs.join("\n\n"),
+                Some(prefer_error_output(&pull_capture)),
+                started_at,
+            ));
+        }
+    }
+
+    if request.profile.run.image_source == "build" {
+        let build_dir = ensure_existing_dir(request.profile.run.build_context.trim(), "构建目录")?;
+        let build_args = build_run_image_build_args(&request.profile, &image_ref)?;
+        let build_capture = run_deploy_command("docker", &build_args, DEPLOY_DOCKER_TIMEOUT_MS, Some(&build_dir), &mut commands)?;
+        outputs.push(format_command_output("docker", &build_args, &build_capture));
+        if build_capture.exit_code != 0 {
+            return Ok(build_deploy_step_result(
+                "deploy_new",
+                false,
+                false,
+                commands,
+                outputs.join("\n\n"),
+                Some(prefer_error_output(&build_capture)),
+                started_at,
+            ));
+        }
+    }
+
+    let run_args = build_run_deploy_args(&request.profile, &image_ref)?;
+    let run_capture = run_deploy_command("docker", &run_args, DEPLOY_DOCKER_TIMEOUT_MS, None, &mut commands)?;
+    outputs.push(format_command_output("docker", &run_args, &run_capture));
+
+    Ok(build_deploy_step_result(
+        "deploy_new",
+        run_capture.exit_code == 0,
+        false,
+        commands,
+        outputs.join("\n\n"),
+        if run_capture.exit_code == 0 {
+            None
+        } else {
+            Some(prefer_error_output(&run_capture))
+        },
+        started_at,
+    ))
+}
+
+fn build_run_image_pull_args(image_ref: &str) -> Result<Vec<String>, String> {
+    if !is_safe_docker_image_ref(image_ref) {
+        return Err("镜像引用包含非法字符。".to_string());
+    }
+
+    Ok(vec!["pull".to_string(), image_ref.to_string()])
+}
+
+fn build_run_deploy_args(profile: &DeployProfile, image_ref: &str) -> Result<Vec<String>, String> {
+    if profile.run.param_mode == "template" {
+        return build_run_template_args(profile, image_ref);
+    }
+
+    build_run_form_args(profile, image_ref)
+}
+
+fn build_run_form_args(profile: &DeployProfile, image_ref: &str) -> Result<Vec<String>, String> {
+    let container_name = profile.run.container_name.trim();
+    if !is_safe_identifier(container_name) {
+        return Err("容器名称不合法，仅允许字母、数字、点、下划线、中划线。".to_string());
+    }
+
+    let mut args = vec![
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        container_name.to_string(),
+    ];
+
+    if !profile.run.restart_policy.trim().is_empty() {
+        args.push("--restart".to_string());
+        args.push(profile.run.restart_policy.trim().to_string());
+    }
+
+    for line in split_non_empty_lines(&profile.run.ports_text) {
+        args.push("-p".to_string());
+        args.push(line);
+    }
+
+    for line in split_non_empty_lines(&profile.run.env_text) {
+        args.push("-e".to_string());
+        args.push(line);
+    }
+
+    for line in split_non_empty_lines(&profile.run.volumes_text) {
+        args.push("-v".to_string());
+        args.push(line);
+    }
+
+    if !profile.run.extra_args.trim().is_empty() {
+        args.extend(
+            profile
+                .run
+                .extra_args
+                .split_whitespace()
+                .map(|item| item.trim().to_string())
+                .filter(|item| !item.is_empty()),
+        );
+    }
+
+    args.push(image_ref.to_string());
+    Ok(args)
+}
+
+fn build_run_template_args(profile: &DeployProfile, image_ref: &str) -> Result<Vec<String>, String> {
+    let container_name = profile.run.container_name.trim();
+    if !is_safe_identifier(container_name) {
+        return Err("容器名称不合法，仅允许字母、数字、点、下划线、中划线。".to_string());
+    }
+
+    let template = profile
+        .run
+        .template_args
+        .replace("{{IMAGE}}", image_ref)
+        .replace("{{CONTAINER}}", container_name);
+    let mut tokens: Vec<String> = template
+        .split_whitespace()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect();
+
+    if tokens.is_empty() {
+        return Err("高级模板参数不能为空。".to_string());
+    }
+
+    if tokens[0] != "run" {
+        tokens.insert(0, "run".to_string());
+    }
+
+    Ok(tokens)
+}
+
+fn build_run_image_build_args(profile: &DeployProfile, image_ref: &str) -> Result<Vec<String>, String> {
+    if !is_safe_docker_image_ref(image_ref) {
+        return Err("镜像 Tag 不合法。".to_string());
+    }
+
+    let mut args = vec!["build".to_string(), "-t".to_string(), image_ref.to_string()];
+    if !profile.run.dockerfile.trim().is_empty() {
+        args.push("-f".to_string());
+        args.push(profile.run.dockerfile.trim().to_string());
+    }
+    args.push(".".to_string());
+    Ok(args)
+}
+
+fn resolve_run_image_ref(profile: &DeployProfile) -> Result<String, String> {
+    if profile.run.image_source == "build" {
+        let tag = profile.run.image_tag.trim();
+        if tag.is_empty() {
+            return Err("构建模式缺少镜像 Tag。".to_string());
+        }
+        if !is_safe_docker_image_ref(tag) {
+            return Err("构建模式镜像 Tag 包含非法字符。".to_string());
+        }
+        return Ok(tag.to_string());
+    }
+
+    let image_ref = profile.run.image_ref.trim();
+    if image_ref.is_empty() {
+        return Err("拉取模式缺少镜像引用。".to_string());
+    }
+    if !is_safe_docker_image_ref(image_ref) {
+        return Err("镜像引用包含非法字符。".to_string());
+    }
+    Ok(image_ref.to_string())
+}
+
+fn build_compose_stop_args(profile: &DeployProfile) -> Vec<String> {
+    let mut args = vec!["compose".to_string()];
+    if !profile.compose.compose_file.trim().is_empty() {
+        args.push("-f".to_string());
+        args.push(profile.compose.compose_file.trim().to_string());
+    }
+    args.push("stop".to_string());
+    if !profile.compose.service.trim().is_empty() {
+        args.push(profile.compose.service.trim().to_string());
+    }
+    args
+}
+
+fn build_compose_up_args(profile: &DeployProfile) -> Vec<String> {
+    let mut args = vec!["compose".to_string()];
+    if !profile.compose.compose_file.trim().is_empty() {
+        args.push("-f".to_string());
+        args.push(profile.compose.compose_file.trim().to_string());
+    }
+    args.extend([
+        "up".to_string(),
+        "-d".to_string(),
+        "--build".to_string(),
+        "--force-recreate".to_string(),
+    ]);
+    if !profile.compose.service.trim().is_empty() {
+        args.push(profile.compose.service.trim().to_string());
+    }
+    args
+}
+
+fn run_deploy_command(
+    command: &str,
+    args: &[String],
+    timeout_ms: u64,
+    current_dir: Option<&Path>,
+    command_records: &mut Vec<String>,
+) -> Result<process_runner::ProcessCapture, String> {
+    command_records.push(format!("{} {}", command, args.join(" ")));
+    execute_process_with_timeout_in_dir(command, args, timeout_ms, current_dir)
+}
+
+fn build_deploy_step_result(
+    step: &str,
+    ok: bool,
+    skipped: bool,
+    commands: Vec<String>,
+    output: String,
+    error: Option<String>,
+    started_at: Instant,
+) -> DeployStepResult {
+    DeployStepResult {
+        step: step.to_string(),
+        ok,
+        skipped,
+        commands,
+        output,
+        error,
+        elapsed_ms: started_at.elapsed().as_millis(),
+    }
+}
+
+fn resolve_deploy_project_path(profile: &DeployProfile) -> Result<String, String> {
+    let value = if profile.mode == "compose" {
+        profile.compose.project_path.trim()
+    } else {
+        profile.run.build_context.trim()
+    };
+
+    if value.is_empty() {
+        return Err("缺少项目目录配置。".to_string());
+    }
+
+    Ok(value.to_string())
+}
+
+fn ensure_existing_dir(raw: &str, label: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(raw.trim());
+    if !path.exists() {
+        return Err(format!("{}不存在: {}", label, raw));
+    }
+    if !path.is_dir() {
+        return Err(format!("{}不是目录: {}", label, raw));
+    }
+    Ok(path)
+}
+
+fn is_safe_docker_image_ref(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/' | ':' | '@'))
+}
+
+fn is_safe_git_ref(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/' | '.'))
+}
+
+fn normalize_remote_name(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        "origin".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn split_non_empty_lines(raw: &str) -> Vec<String> {
+    raw.split('\n')
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn format_command_output(command: &str, args: &[String], capture: &process_runner::ProcessCapture) -> String {
+    let mut chunks = vec![format!(
+        "$ {} {}\nexit={}",
+        command,
+        args.join(" "),
+        capture.exit_code
+    )];
+
+    if !capture.stdout.trim().is_empty() {
+        chunks.push(capture.stdout.trim().to_string());
+    }
+    if !capture.stderr.trim().is_empty() {
+        chunks.push(format!("[stderr]\n{}", capture.stderr.trim()));
+    }
+
+    chunks.join("\n\n")
+}
+
+fn prefer_error_output(capture: &process_runner::ProcessCapture) -> String {
+    if !capture.stderr.trim().is_empty() {
+        return capture.stderr.trim().to_string();
+    }
+
+    if !capture.stdout.trim().is_empty() {
+        return capture.stdout.trim().to_string();
+    }
+
+    "无输出".to_string()
+}
+
 fn execute_install_item(item_key: &str, install_path: Option<&str>) -> Result<InstallResult, String> {
     let spec = install_specs()
         .into_iter()
         .find(|item| item.key == item_key)
         .ok_or_else(|| format!("未找到可安装项：{}", item_key))?;
 
-    let _ = run_command_with_timeout("winget", &["--version"], TOOL_DETECT_TIMEOUT_MS)
-        .map_err(|_| "未检测到 winget，请先安装 App Installer".to_string())?;
+    let plan = resolve_install_plan(spec.key, spec.package_id, install_path)?;
+    let capture = execute_process_with_timeout(&plan.command, &plan.args, WINGET_INSTALL_TIMEOUT_MS).map_err(|error| {
+        if plan.command == "npm" {
+            let lowered = error.to_lowercase();
+            let maybe_not_found = lowered.contains("not found")
+                || lowered.contains("not recognized")
+                || error.contains("系统找不到指定的文件")
+                || error.contains("找不到文件");
 
-    let mut args = vec![
-        "install".to_string(),
-        "--id".to_string(),
-        spec.package_id.to_string(),
-        "--exact".to_string(),
-        "--silent".to_string(),
-        "--accept-source-agreements".to_string(),
-        "--accept-package-agreements".to_string(),
-    ];
+            if maybe_not_found {
+                return "未找到 npm 命令。请确认安装的是官方 Node.js（含 npm），并重启应用后重试。".to_string();
+            }
+        }
 
-    if let Some(path) = install_path.map(str::trim).filter(|value| !value.is_empty()) {
-        args.push("--location".to_string());
-        args.push(path.to_string());
-    }
-
-    let capture = execute_process_with_timeout("winget", &args, WINGET_INSTALL_TIMEOUT_MS)?;
+        error
+    })?;
 
     Ok(InstallResult {
         item_key: item_key.to_string(),
-        package_id: spec.package_id.to_string(),
-        command: format!("winget {}", args.join(" ")),
+        package_id: plan.package_id,
+        command: format!("{} {}", plan.command, plan.args.join(" ")),
         stdout: capture.stdout,
         stderr: capture.stderr,
         exit_code: capture.exit_code,
     })
 }
 
+fn resolve_install_plan(
+    item_key: &str,
+    package_id: &str,
+    install_path: Option<&str>,
+) -> Result<InstallExecutionPlan, String> {
+    let node_package = node_package_name(item_key);
+    if let Some(npm_package) = node_package {
+        return Ok(build_npm_global_install_plan(npm_package));
+    }
+
+    let winget_available = run_command_with_timeout("winget", &["--version"], TOOL_DETECT_TIMEOUT_MS).is_ok();
+    if winget_available {
+        let mut args = vec![
+            "install".to_string(),
+            "--id".to_string(),
+            package_id.to_string(),
+            "--exact".to_string(),
+            "--silent".to_string(),
+            "--accept-source-agreements".to_string(),
+            "--accept-package-agreements".to_string(),
+        ];
+
+        if let Some(path) = install_path.map(str::trim).filter(|value| !value.is_empty()) {
+            args.push("--location".to_string());
+            args.push(path.to_string());
+        }
+
+        return Ok(InstallExecutionPlan {
+            command: "winget".to_string(),
+            args,
+            package_id: package_id.to_string(),
+        });
+    }
+
+    Err("未检测到 winget，请先安装 App Installer".to_string())
+}
+
+fn node_package_name(item_key: &str) -> Option<&'static str> {
+    match item_key {
+        "pnpm" => Some("pnpm"),
+        "yarn" => Some("yarn"),
+        "claude-code" => Some("@anthropic-ai/claude-code"),
+        "codex-cli" => Some("@openai/codex"),
+        "gemini-cli" => Some("@google/gemini-cli"),
+        _ => None,
+    }
+}
+
+fn build_npm_global_install_plan(npm_package: &str) -> InstallExecutionPlan {
+    InstallExecutionPlan {
+        command: "npm".to_string(),
+        args: vec!["install".to_string(), "-g".to_string(), npm_package.to_string()],
+        package_id: format!("npm:{}", npm_package),
+    }
+}
+
+fn execute_uninstall_item(item_key: &str) -> Result<UninstallResult, String> {
+    let spec = install_specs()
+        .into_iter()
+        .find(|item| item.key == item_key)
+        .ok_or_else(|| format!("未找到可卸载项：{}", item_key))?;
+
+    let plan = resolve_uninstall_plan(spec.key, spec.package_id)?;
+    let capture = execute_process_with_timeout(&plan.command, &plan.args, WINGET_INSTALL_TIMEOUT_MS)?;
+
+    Ok(UninstallResult {
+        item_key: item_key.to_string(),
+        package_id: plan.package_id,
+        command: format!("{} {}", plan.command, plan.args.join(" ")),
+        stdout: capture.stdout,
+        stderr: capture.stderr,
+        exit_code: capture.exit_code,
+    })
+}
+
+fn resolve_uninstall_plan(
+    item_key: &str,
+    package_id: &str,
+) -> Result<InstallExecutionPlan, String> {
+    if let Some(npm_package) = node_package_name(item_key) {
+        return Ok(InstallExecutionPlan {
+            command: "npm".to_string(),
+            args: vec!["uninstall".to_string(), "-g".to_string(), npm_package.to_string()],
+            package_id: format!("npm:{}", npm_package),
+        });
+    }
+
+    let winget_available = run_command_with_timeout("winget", &["--version"], TOOL_DETECT_TIMEOUT_MS).is_ok();
+    if winget_available {
+        return Ok(InstallExecutionPlan {
+            command: "winget".to_string(),
+            args: vec![
+                "uninstall".to_string(),
+                "--id".to_string(),
+                package_id.to_string(),
+                "--exact".to_string(),
+                "--silent".to_string(),
+                "--purge".to_string(),
+            ],
+            package_id: package_id.to_string(),
+        });
+    }
+
+    Err("未检测到 winget，请先安装 App Installer".to_string())
+}
+
 fn select_install_directory() -> Result<Option<String>, String> {
+    select_directory_with_prompt("选择安装目录")
+}
+
+fn select_project_directory() -> Result<Option<String>, String> {
+    select_directory_with_prompt("选择项目目录")
+}
+
+fn select_directory_with_prompt(prompt: &str) -> Result<Option<String>, String> {
     if !cfg!(target_os = "windows") {
         return Ok(None);
     }
 
-    let script = r#"
+    let script = format!(
+        r#"
 Add-Type -AssemblyName System.Windows.Forms
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = "选择安装目录"
+$dialog.Description = "{}"
 $dialog.ShowNewFolderButton = $true
 $result = $dialog.ShowDialog()
-if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) {{
   $dialog.SelectedPath
-}
-"#;
+}}
+"#,
+        prompt
+    );
 
     let picked = run_command_with_timeout(
         "powershell",
-        &["-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-Command", script],
+        &["-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-Command", &script],
         WINGET_INSTALL_TIMEOUT_MS,
     )
     .unwrap_or_default();
@@ -1335,16 +2190,28 @@ fn build_docker_args(action: &str, target: Option<&str>) -> Result<Vec<String>, 
         ]),
         "system_df" => Ok(vec!["system".to_string(), "df".to_string()]),
         "compose_ls" => Ok(vec!["compose".to_string(), "ls".to_string()]),
-        "start" | "stop" | "restart" | "logs" => {
+        "run" | "start" | "stop" | "restart" | "logs" | "rm" | "rmi" => {
             let target = target.ok_or_else(|| format!("动作 {} 需要提供容器名称或 ID", action))?;
             if !is_safe_identifier(target) {
                 return Err("容器标识不合法，仅允许字母、数字、点、下划线、中划线".to_string());
             }
 
             match action {
+                "run" => {
+                    let run_name = format!("dep-run-{}", current_timestamp_ms());
+                    Ok(vec![
+                        "run".to_string(),
+                        "-d".to_string(),
+                        "--name".to_string(),
+                        run_name,
+                        target.to_string(),
+                    ])
+                }
                 "start" => Ok(vec!["start".to_string(), target.to_string()]),
                 "stop" => Ok(vec!["stop".to_string(), target.to_string()]),
                 "restart" => Ok(vec!["restart".to_string(), target.to_string()]),
+                "rm" => Ok(vec!["rm".to_string(), target.to_string()]),
+                "rmi" => Ok(vec!["rmi".to_string(), target.to_string()]),
                 "logs" => Ok(vec![
                     "logs".to_string(),
                     "--tail".to_string(),
@@ -1371,6 +2238,16 @@ fn first_line(raw: &str) -> Option<String> {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .map(ToString::to_string)
+}
+
+fn is_missing_command_detail(detail: &str) -> bool {
+    let lowered = detail.to_lowercase();
+    detail.contains("不是内部或外部命令")
+        || detail.contains("系统找不到指定的文件")
+        || lowered.contains("not recognized as an internal or external command")
+        || lowered.contains("is not recognized")
+        || lowered.contains("command not found")
+        || lowered.contains("no such file or directory")
 }
 
 fn spawn_system_sampling_workers(runtime_state: AppRuntimeState) {
@@ -1445,8 +2322,12 @@ pub fn run() {
             detect_dev_tools,
             run_docker_action,
             get_docker_overview_batch,
+            list_git_branches,
+            execute_deploy_step,
             install_market_item,
-            pick_install_directory
+            uninstall_market_item,
+            pick_install_directory,
+            pick_project_directory
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1455,6 +2336,40 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_deploy_profile() -> DeployProfile {
+        DeployProfile {
+            id: "p1".to_string(),
+            name: "test".to_string(),
+            mode: "run".to_string(),
+            git: DeployGitConfig {
+                enabled: true,
+                remote: "origin".to_string(),
+            },
+            compose: DeployComposeConfig {
+                project_path: "D:/workspace/demo".to_string(),
+                compose_file: "docker-compose.yml".to_string(),
+                service: "web".to_string(),
+            },
+            run: DeployRunConfig {
+                param_mode: "form".to_string(),
+                container_name: "demo-app".to_string(),
+                image_ref: "nginx:latest".to_string(),
+                image_source: "pull".to_string(),
+                build_context: "D:/workspace/demo".to_string(),
+                dockerfile: "Dockerfile".to_string(),
+                image_tag: "demo:latest".to_string(),
+                ports_text: "8080:8080\n9090:9090".to_string(),
+                env_text: "NODE_ENV=production".to_string(),
+                volumes_text: "./data:/app/data:rw".to_string(),
+                restart_policy: "unless-stopped".to_string(),
+                extra_args: "--network bridge".to_string(),
+                template_args: "-d --name {{CONTAINER}} {{IMAGE}}".to_string(),
+            },
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
 
     #[test]
     fn safe_identifier_validation_should_work() {
@@ -1467,10 +2382,65 @@ mod tests {
 
     #[test]
     fn build_docker_args_should_validate_target() {
+        let run = build_docker_args("run", Some("sha256abc123")).expect("run args should build");
         let logs = build_docker_args("logs", Some("redis-dev")).expect("logs args should build");
+        let rm = build_docker_args("rm", Some("redis-dev")).expect("rm args should build");
+        let rmi = build_docker_args("rmi", Some("sha256abc123")).expect("rmi args should build");
+
+        assert_eq!(run[0], "run");
+        assert_eq!(run[1], "-d");
+        assert_eq!(run[2], "--name");
         assert_eq!(logs[0], "logs");
+        assert_eq!(rm[0], "rm");
+        assert_eq!(rmi[0], "rmi");
+
         assert!(build_docker_args("logs", Some("redis dev")).is_err());
+        assert!(build_docker_args("rmi", Some("nginx:latest")).is_err());
         assert!(build_docker_args("start", None).is_err());
+    }
+
+    #[test]
+    fn deploy_args_builder_should_support_compose_and_run() {
+        let mut profile = sample_deploy_profile();
+        profile.mode = "compose".to_string();
+
+        let compose_stop = build_compose_stop_args(&profile);
+        let compose_up = build_compose_up_args(&profile);
+        assert_eq!(compose_stop[0], "compose");
+        assert!(compose_stop.contains(&"stop".to_string()));
+        assert!(compose_up.contains(&"up".to_string()));
+
+        profile.mode = "run".to_string();
+        let run_form_args = build_run_form_args(&profile, "nginx:latest").expect("run form args should build");
+        assert_eq!(run_form_args[0], "run");
+        assert!(run_form_args.contains(&"-p".to_string()));
+        assert!(run_form_args.contains(&"-e".to_string()));
+        assert!(run_form_args.contains(&"-v".to_string()));
+
+        let pull_args = build_run_image_pull_args("looplj/axonhub:latest").expect("run pull args should build");
+        assert_eq!(pull_args[0], "pull");
+        assert_eq!(pull_args[1], "looplj/axonhub:latest");
+        assert!(build_run_image_pull_args("looplj/axonhub latest").is_err());
+    }
+
+    #[test]
+    fn deploy_template_args_should_replace_placeholders() {
+        let mut profile = sample_deploy_profile();
+        profile.run.param_mode = "template".to_string();
+        profile.run.template_args = "-d --name {{CONTAINER}} -p 8080:8080 {{IMAGE}}".to_string();
+
+        let args = build_run_template_args(&profile, "looplj/axonhub:latest").expect("template args should build");
+        assert_eq!(args[0], "run");
+        assert!(args.iter().any(|item| item == "demo-app"));
+        assert!(args.iter().any(|item| item == "looplj/axonhub:latest"));
+    }
+
+    #[test]
+    fn git_ref_validation_should_reject_invalid_values() {
+        assert!(is_safe_git_ref("main"));
+        assert!(is_safe_git_ref("feature/docker-flow"));
+        assert!(!is_safe_git_ref(""));
+        assert!(!is_safe_git_ref("main && rm"));
     }
 
     #[test]
@@ -1514,13 +2484,3 @@ mod tests {
         assert!(results.iter().all(|item| !item.action.is_empty()));
     }
 }
-
-
-
-
-
-
-
-
-
-

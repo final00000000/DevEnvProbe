@@ -26,6 +26,9 @@ describe('SystemState', () => {
       expect(state.appIsVisible).toBe(true);
       expect(state.uptimeAnchorSeconds).toBe(0);
       expect(state.uptimeAnchorAtMs).toBe(0);
+      expect(state.bootstrapStatus).toBe('idle');
+      expect(state.bootstrapError).toBeNull();
+      expect(state.bootstrapStartedAt).toBe(0);
     });
 
     it('应该创建趋势状态', () => {
@@ -66,6 +69,20 @@ describe('SystemState', () => {
       state.updateUptimeAnchor(0);
 
       expect(state.uptimeAnchorSeconds).toBe(3600);
+      expect(state.uptimeAnchorAtMs).toBe(anchorAt);
+    });
+
+    it('小幅抖动回退时应保持锚点不变', () => {
+      const now = Date.now();
+      vi.setSystemTime(now);
+
+      state.updateUptimeAnchor(500);
+      const anchorAt = state.uptimeAnchorAtMs;
+
+      vi.setSystemTime(now + 2000);
+      state.updateUptimeAnchor(501); // 预期约 502，回退 1 秒
+
+      expect(state.uptimeAnchorSeconds).toBe(500);
       expect(state.uptimeAnchorAtMs).toBe(anchorAt);
     });
   });

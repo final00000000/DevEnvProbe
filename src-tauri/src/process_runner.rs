@@ -1,6 +1,7 @@
 use encoding_rs::GBK;
 use std::fmt::Display;
 use std::io::Read;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -17,6 +18,9 @@ pub struct ProcessCapture {
     pub stderr: String,
     pub exit_code: i32,
 }
+
+/// 超时退出码：进程被杀但已有部分输出
+pub const TIMEOUT_EXIT_CODE: i32 = -1000;
 
 pub fn run_command_with_timeout(
     command: &str,
@@ -48,8 +52,16 @@ pub fn execute_process_with_timeout(
     args: &[String],
     timeout_ms: u64,
 ) -> Result<ProcessCapture, String> {
-    let mut child = create_command(command)
-        .args(args)
+    execute_process_with_timeout_in_dir(command, args, timeout_ms, None)
+}
+
+pub fn execute_process_with_timeout_in_dir(
+    command: &str,
+    args: &[String],
+    timeout_ms: u64,
+    current_dir: Option<&Path>,
+) -> Result<ProcessCapture, String> {
+    let mut child = create_command_with_args(command, args, current_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -96,17 +108,12 @@ pub fn execute_process_with_timeout(
 
                     let stdout = decode_bytes(&stdout_bytes);
                     let stderr = decode_bytes(&stderr_bytes);
-                    let mut details = format!("命令执行超时（{}ms）：{} {}", timeout_ms, command, args.join(" "));
 
-                    if !stdout.is_empty() {
-                        details.push_str(&format!("\n[stdout]\n{}", stdout));
-                    }
-
-                    if !stderr.is_empty() {
-                        details.push_str(&format!("\n[stderr]\n{}", stderr));
-                    }
-
-                    return Err(details);
+                    return Ok(ProcessCapture {
+                        stdout,
+                        stderr,
+                        exit_code: TIMEOUT_EXIT_CODE,
+                    });
                 }
 
                 thread::sleep(Duration::from_millis(20));
@@ -115,15 +122,56 @@ pub fn execute_process_with_timeout(
     }
 }
 
-fn create_command(command: &str) -> Command {
-    let mut process = Command::new(command);
-
+fn needs_cmd_wrapper(command: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
-        process.creation_flags(CREATE_NO_WINDOW);
+        let lower = command.to_lowercase();
+        // .cmd/.bat 脚本无法被 Command::new 直接执行，需要 cmd /C 包装
+        if lower.ends_with(".cmd") || lower.ends_with(".bat") {
+            return true;
+        }
+        // npm/pnpm/yarn 等在 Windows 上实际是 .cmd 脚本
+        matches!(lower.as_str(), "npm" | "pnpm" | "yarn" | "npx" | "bun" | "deno" | "pip" | "pipx" | "uv" | "conda" | "flutter" | "dart" | "az" | "gcloud" | "gemini" | "codex")
     }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = command;
+        false
+    }
+}
 
-    process
+fn create_command_with_args(command: &str, args: &[String], current_dir: Option<&Path>) -> Command {
+    if needs_cmd_wrapper(command) {
+        let mut process = Command::new("cmd");
+        let mut cmd_args = vec!["/C".to_string(), command.to_string()];
+        cmd_args.extend_from_slice(args);
+        process.args(&cmd_args);
+
+        if let Some(dir) = current_dir {
+            process.current_dir(dir);
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            process.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        process
+    } else {
+        let mut process = Command::new(command);
+        process.args(args);
+
+        if let Some(dir) = current_dir {
+            process.current_dir(dir);
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            process.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        process
+    }
 }
 
 fn decode_bytes(bytes: &[u8]) -> String {
@@ -184,4 +232,3 @@ mod tests {
         assert!(result.err().unwrap_or_default().contains("命令执行超时"));
     }
 }
-

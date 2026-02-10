@@ -58,3 +58,26 @@ QUICK_START.md
 QUICK_TEST_GUIDE.md
 TESTING_GUIDE.md
 VERIFICATION_GUIDE.md
+THEME-*.md
+*-SUMMARY.md
+*-ANALYSIS.md
+*-CHECKLIST.md
+*-REFERENCE.md
+
+# 临时预览和调试文件
+color-preview*.html
+check-*.js
+
+# 敏感文件
+*.pem
+*.key
+*.cert
+*.p12
+*.pfx
+credentials.*
+secrets.*
+*.secret
+
+# Rust 构建产物
+src-tauri/target/
+.ace-tool/

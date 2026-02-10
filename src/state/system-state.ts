@@ -42,6 +42,15 @@ export class SystemState {
   /** 系统快照最后获取时间戳（ms） */
   snapshotLastFetchedAt = 0;
 
+  /** 系统首页引导状态 */
+  bootstrapStatus: "idle" | "loading" | "partial" | "ready" | "error" = "idle";
+
+  /** 系统首页引导错误信息 */
+  bootstrapError: string | null = null;
+
+  /** 系统首页引导开始时间（ms） */
+  bootstrapStartedAt = 0;
+
   /**
    * 重置所有定时器
    */
@@ -71,6 +80,21 @@ export class SystemState {
     const normalizedUptime = Math.max(0, Math.floor(uptimeSeconds));
     if (normalizedUptime <= 0 && this.uptimeAnchorSeconds > 0) {
       return;
+    }
+
+    if (this.uptimeAnchorAtMs > 0) {
+      const expectedUptime = this.getAnchoredUptimeSeconds();
+      const driftSeconds = normalizedUptime - expectedUptime;
+
+      // 1 秒内抖动直接忽略，避免显示跳秒
+      if (Math.abs(driftSeconds) <= 1) {
+        return;
+      }
+
+      // 小幅回退不重置锚点，保持显示单调递增
+      if (driftSeconds < 0 && expectedUptime - normalizedUptime < 120) {
+        return;
+      }
     }
 
     this.uptimeAnchorSeconds = normalizedUptime;

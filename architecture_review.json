@@ -1,0 +1,101 @@
+{
+  "findings": [
+    {
+      "severity": "Critical",
+      "dimension": "patterns",
+      "file": "src/pages/ToolsPage.ts",
+      "lines": 967,
+      "description": "Monolithic class structure mixing rendering, event handling, and complex async flow control. Inconsistent with the new tripartite (Controller/Renderer/Coordinator) pattern introduced in DockerPage.",
+      "fix_suggestion": "Refactor into a directory-based module 'src/pages/tools/' using the tripartite structure."
+    },
+    {
+      "severity": "Warning",
+      "dimension": "patterns",
+      "file": "src/pages/SystemPage.ts",
+      "lines": 514,
+      "description": "Monolithic class structure similar to ToolsPage. Mixes dashboard rendering with bootstrap logic.",
+      "fix_suggestion": "Refactor into 'src/pages/system/' using the tripartite structure."
+    },
+    {
+      "severity": "Critical",
+      "dimension": "dead_code",
+      "file": "src/pages/DockerPage.old.ts",
+      "lines": 1078,
+      "description": "Legacy monolithic version of DockerPage. No longer used since the move to src/pages/docker/.",
+      "fix_suggestion": "Remove the file to reduce codebase noise and prevent accidental edits."
+    },
+    {
+      "severity": "Warning",
+      "dimension": "css",
+      "file": "src/styles.css",
+      "lines": 3086,
+      "description": "Massive CSS file containing global styles, theme variables, and component-specific styles. Hard to navigate and maintain.",
+      "fix_suggestion": "Split into theme-specific files (e.g., themes.css) and component-specific modules or use Tailwind's @apply in smaller files."
+    },
+    {
+      "severity": "Info",
+      "dimension": "maintainability",
+      "file": "src/main.ts",
+      "lines": 350,
+      "description": "Contains app initialization, navigation, and page-specific watchdog logic (System loading).",
+      "fix_suggestion": "Extract watchdog logic into SystemCoordinator or a specialized AppInitializer module."
+    },
+    {
+      "severity": "Warning",
+      "dimension": "integration",
+      "file": "src/pages/index.ts",
+      "description": "Directly exporting instances (e.g., toolsPage) from monolithic files while DockerPage exports from a directory index.",
+      "fix_suggestion": "Standardize export pattern: every page should have its own directory with an index.ts."
+    }
+  ],
+  "split_proposals": [
+    {
+      "source_file": "src/pages/ToolsPage.ts",
+      "current_lines": 967,
+      "proposed_splits": [
+        {
+          "new_file": "src/pages/tools/ToolsRenderer.ts",
+          "responsibility": "Pure HTML string generation for tool cards, grids, installation progress, and skeleton states.",
+          "estimated_lines": 350
+        },
+        {
+          "new_file": "src/pages/tools/ToolsController.ts",
+          "responsibility": "DOM event binding, search debouncing, filter interaction, and delegating actions to the coordinator.",
+          "estimated_lines": 200
+        },
+        {
+          "new_file": "src/pages/tools/ToolsCoordinator.ts",
+          "responsibility": "High-level flow control: installation/uninstallation lifecycle, auto-refresh scheduling, and state synchronization.",
+          "estimated_lines": 300
+        },
+        {
+          "new_file": "src/pages/tools/index.ts",
+          "responsibility": "Aggregator and main entry point for the Tools page, managing the tripartite lifecycle.",
+          "estimated_lines": 100
+        }
+      ]
+    },
+    {
+      "source_file": "src/pages/SystemPage.ts",
+      "current_lines": 514,
+      "proposed_splits": [
+        {
+          "new_file": "src/pages/system/SystemRenderer.ts",
+          "responsibility": "Rendering of system dashboard, bootstrap/error states, and metric cards.",
+          "estimated_lines": 200
+        },
+        {
+          "new_file": "src/pages/system/SystemCoordinator.ts",
+          "responsibility": "Snapshot fetching logic, bootstrap status management, and integration with systemService.",
+          "estimated_lines": 150
+        },
+        {
+          "new_file": "src/pages/system/SystemController.ts",
+          "responsibility": "Handling retry actions and any future dashboard-level interactions.",
+          "estimated_lines": 100
+        }
+      ]
+    }
+  ],
+  "summary": "The codebase is currently in a transitional state. DockerPage correctly implements the new tripartite architecture, which improves maintainability and separation of concerns. However, ToolsPage and SystemPage remain as large, monolithic files that mix UI logic with business logic. Additionally, significant dead code (DockerPage.old.ts) and a bloated styles.css present maintenance risks. Standardizing on the directory-based tripartite pattern for all pages and cleaning up legacy artifacts is recommended."
+}

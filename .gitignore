@@ -27,6 +27,7 @@ dist-ssr
 .claude/
 .serena/
 .spec-workflow/
+.cursor/
 
 # 临时文件和调试脚本
 tmp*
@@ -63,10 +64,20 @@ THEME-*.md
 *-ANALYSIS.md
 *-CHECKLIST.md
 *-REFERENCE.md
+AGENTS.md
+COMMAND_CONTRACT.md
+FINAL_REPORT.md
+IMPLEMENTATION_PLAN.md
+IMPLEMENTATION_SUMMARY.md
+MANUAL_VERIFICATION_CHECKLIST.md
 
 # 临时预览和调试文件
 color-preview*.html
 check-*.js
+showcase-*.html
+test.html
+z_patch.txt
+*.backup.ts
 
 # 敏感文件
 *.pem

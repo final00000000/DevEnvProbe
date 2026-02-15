@@ -1,6 +1,7 @@
-import { appState, deployState, dockerState } from "../state";
-import { deployService, dockerService } from "../services";
-import { getDockerEmptyState, getDockerLoadingState, getDockerPanelSkeleton, getDockerSummarySkeletonCards, getMetricCard } from "../ui";
+import { appState, deployState, dockerState, dockerVersionState } from "../../state";
+import { deployService, dockerService, dockerVersionService } from "../../services";
+import { versionConfigStorage } from "../../services/version-config-storage";
+import { getDockerEmptyState, getDockerLoadingState, getDockerPanelSkeleton, getDockerSummarySkeletonCards, getMetricCard } from "../../ui";
 import {
   DANGER_DOCKER_ACTIONS,
   SAFE_DOCKER_ACTIONS,
@@ -15,21 +16,33 @@ import {
   resolveDockerActionState,
   saveDockerAdvancedMode,
   shouldAutoOpenDockerOutputDrawer,
-} from "../modules/docker-workbench";
+} from "../../modules/docker-workbench";
 import {
+  createInitialDeploySteps,
   DeployOrchestrator,
   renderDeployPipelineCard,
   resolveGitProjectPath,
   validateProfileForExecution,
-} from "../modules/deploy";
-import { isContainerRunning } from "../modules/docker-data";
-import { debounce } from "../utils/debounce";
-import { escapeHtml, formatPercent, getBadgeClassByUsage } from "../utils/formatters";
-import { MemoryMonitor } from "../utils/memory-monitor";
-import { DOCKER_INIT_DELAY_MS, DOCKER_SEARCH_DEBOUNCE_MS } from "../constants/config";
-import { showGlobalNotice } from "../modules/shell-ui";
-import type { DeployProfile, DockerActionType, DockerPanelTab, DockerSelectionKind } from "../types";
-import type { DockerOverviewMode } from "../services/docker-service";
+} from "../../modules/deploy";
+import { isContainerRunning } from "../../modules/docker-data";
+import { debounce } from "../../utils/debounce";
+import { escapeHtml, formatPercent, getBadgeClassByUsage } from "../../utils/formatters";
+import { MemoryMonitor } from "../../utils/memory-monitor";
+import { DOCKER_INIT_DELAY_MS, DOCKER_SEARCH_DEBOUNCE_MS } from "../../constants/config";
+import { showGlobalNotice } from "../../modules/shell-ui";
+import { renderSourceSelectionModalWithPreset, renderVersionManagementBlock } from "../../ui/docker-version-ui";
+import type {
+  DeployPipelineState,
+  DeployProfile,
+  DeployStepResult,
+  DockerActionType,
+  DockerPanelTab,
+  DockerSelectionKind,
+  VersionSourceConfig,
+  VersionSourceKind,
+  UpdateStepLog,
+} from "../../types";
+import type { DockerOverviewMode } from "../../services/docker-service";
 
 interface ManagedListener {
   element: Element;
@@ -51,6 +64,10 @@ const TAB_EMPTY: Record<DockerPanelTab, string> = {
   compose: "未匹配到 Compose 项目，请刷新概览。",
 };
 
+const DOCKER_VERSION_LOCK_ID = "docker-version-check-lock";
+
+type DeployWorkflowMode = "start_only" | "pull_and_start";
+
 export class DockerPage {
   private summaryCardsCache: string | null = null;
   private lastSummaryFingerprint: string | null = null;
@@ -58,6 +75,7 @@ export class DockerPage {
   private pageListeners: ManagedListener[] = [];
   private memoryMonitorTimer: number | null = null;
   private panelUpdateRafId: number | null = null;
+  private modalEscHandler: ((e: KeyboardEvent) => void) | null = null;
   private readonly debouncedUpdatePanel = debounce(() => this.requestPanelSectionUpdate(), DOCKER_SEARCH_DEBOUNCE_MS);
   private readonly deployOrchestrator = new DeployOrchestrator({
     executeStep: async (profile, step, selectedBranch) =>
@@ -103,10 +121,30 @@ export class DockerPage {
           <div class="docker-workbench-body">
             <section class="docker-workbench-left">
               <div class="docker-tabs mb-3">
-                <button class="docker-tab ${dockerState.activeTab === "containers" ? "active" : ""}" data-docker-tab="containers">容器</button>
-                <button class="docker-tab ${dockerState.activeTab === "images" ? "active" : ""}" data-docker-tab="images">镜像</button>
-                <button class="docker-tab ${dockerState.activeTab === "stats" ? "active" : ""}" data-docker-tab="stats">资源监控</button>
-                <button class="docker-tab ${dockerState.activeTab === "compose" ? "active" : ""}" data-docker-tab="compose">Compose</button>
+                <button class="docker-tab ${dockerState.activeTab === "containers" ? "active" : ""}" data-docker-tab="containers">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+                  </svg>
+                  <span>容器</span>
+                </button>
+                <button class="docker-tab ${dockerState.activeTab === "images" ? "active" : ""}" data-docker-tab="images">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  </svg>
+                  <span>镜像</span>
+                </button>
+                <button class="docker-tab ${dockerState.activeTab === "stats" ? "active" : ""}" data-docker-tab="stats">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                  </svg>
+                  <span>资源监控</span>
+                </button>
+                <button class="docker-tab ${dockerState.activeTab === "compose" ? "active" : ""}" data-docker-tab="compose">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h4a1 1 0 011 1v7a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v7a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 16a1 1 0 011-1h4a1 1 0 011 1v3a1 1 0 01-1 1H5a1 1 0 01-1-1v-3zM14 16a1 1 0 011-1h4a1 1 0 011 1v3a1 1 0 01-1 1h-4a1 1 0 01-1-1v-3z" />
+                  </svg>
+                  <span>Compose</span>
+                </button>
               </div>
               <div class="docker-filters-row mb-3">
                 <input id="docker-search" class="input flex-1" placeholder="搜索容器、镜像、项目..." value="${escapeHtml(dockerState.filters.search)}" />
@@ -304,7 +342,52 @@ export class DockerPage {
     this.refreshPageView();
   }
 
-  private async runDeployPipeline(): Promise<void> {
+  private async copyOutputToClipboard(): Promise<void> {
+    const text = dockerState.output.trim();
+    if (text.length === 0) {
+      showGlobalNotice("暂无可复制日志", "当前输出为空，请先执行命令或查看部署日志。", "info", 2200);
+      return;
+    }
+
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        await navigator.clipboard.writeText(text);
+        showGlobalNotice("复制成功", "日志内容已复制到剪贴板。", "success", 2200);
+        return;
+      }
+    } catch {}
+
+    if (this.copyTextWithSelection(text)) {
+      showGlobalNotice("复制成功", "日志内容已复制到剪贴板。", "success", 2200);
+      return;
+    }
+
+    showGlobalNotice("复制失败", "当前环境不支持自动复制，请手动选中文本复制。", "error", 2800);
+  }
+
+  private copyTextWithSelection(text: string): boolean {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "true");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    textarea.style.pointerEvents = "none";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+
+    let copied = false;
+    try {
+      copied = document.execCommand("copy");
+    } catch {
+      copied = false;
+    }
+
+    document.body.removeChild(textarea);
+    return copied;
+  }
+
+  private async runDeployPipeline(mode: DeployWorkflowMode): Promise<void> {
     if (deployState.pipeline.running) {
       return;
     }
@@ -315,27 +398,38 @@ export class DockerPage {
       return;
     }
 
-    if (profile.git.enabled && (deployState.availableBranches.length === 0 || deployState.selectedBranch.trim().length === 0)) {
+    const execution = this.prepareDeployExecutionProfile(profile, mode);
+    const executionProfile = execution.profile;
+    if (execution.autoSkippedGit) {
+      showGlobalNotice("已自动切换为镜像更新", "未配置项目目录，已跳过拉取代码，改为直接拉取镜像并启动。", "info", 3200);
+    }
+
+    if (mode === "start_only") {
+      await this.runStartOnlyWorkflow(executionProfile);
+      return;
+    }
+
+    if (executionProfile.git.enabled && (deployState.availableBranches.length === 0 || deployState.selectedBranch.trim().length === 0)) {
       await this.refreshDeployBranches();
       if (deployState.availableBranches.length === 0) {
         return;
       }
     }
 
-    const selectedBranch = deployState.selectedBranch.trim();
+    const selectedBranch = executionProfile.git.enabled ? deployState.selectedBranch.trim() : execution.selectedBranch;
 
-    const validationError = validateProfileForExecution(profile, selectedBranch);
+    const validationError = validateProfileForExecution(executionProfile, selectedBranch);
     if (validationError) {
       showGlobalNotice("部署参数不完整", validationError, "error");
       return;
     }
 
-    if (!this.confirmDeployPipelineRisk(profile, selectedBranch)) {
+    if (!this.confirmDeployPipelineRisk(executionProfile, selectedBranch, mode)) {
       return;
     }
 
     const nextState = await this.deployOrchestrator.run(
-      profile,
+      executionProfile,
       selectedBranch,
       deployState.pipeline,
       (pipelineState) => {
@@ -353,19 +447,208 @@ export class DockerPage {
       return;
     }
 
-    const deployModeText = profile.mode === "run" ? "Run 容器重建" : "Compose 服务更新";
-    const branchText = profile.git.enabled && selectedBranch.length > 0 ? `，分支 ${selectedBranch}` : "";
-    showGlobalNotice("部署完成", `${profile.name} 已完成${deployModeText}${branchText}。`, "success");
+    const deployModeText = executionProfile.mode === "run" ? "Run 容器重建" : "Compose 服务更新";
+    const branchText = executionProfile.git.enabled && selectedBranch.length > 0 ? `，分支 ${selectedBranch}` : "";
+    showGlobalNotice("部署完成", `${executionProfile.name} 已完成拉取新代码并启动（${deployModeText}${branchText}）。`, "success");
     await this.refreshOverviewWithUiSync("quick");
   }
 
-  private confirmDeployPipelineRisk(profile: DeployProfile, selectedBranch: string): boolean {
-    if (profile.mode !== "run") {
+  private prepareDeployExecutionProfile(
+    profile: DeployProfile,
+    mode: DeployWorkflowMode
+  ): { profile: DeployProfile; selectedBranch: string; autoSkippedGit: boolean } {
+    const selectedBranch = deployState.selectedBranch.trim();
+    if (mode !== "pull_and_start") {
+      return {
+        profile,
+        selectedBranch,
+        autoSkippedGit: false,
+      };
+    }
+
+    if (profile.mode !== "run" || profile.run.imageSource !== "pull" || !profile.git.enabled) {
+      return {
+        profile,
+        selectedBranch,
+        autoSkippedGit: false,
+      };
+    }
+
+    const projectPath = resolveGitProjectPath(profile).trim();
+    if (projectPath.length > 0) {
+      return {
+        profile,
+        selectedBranch,
+        autoSkippedGit: false,
+      };
+    }
+
+    return {
+      profile: {
+        ...profile,
+        git: {
+          ...profile.git,
+          enabled: false,
+        },
+      },
+      selectedBranch: "",
+      autoSkippedGit: true,
+    };
+  }
+
+  private async runStartOnlyWorkflow(profile: DeployProfile): Promise<void> {
+    if (profile.mode === "run" && profile.run.containerName.trim().length === 0) {
+      showGlobalNotice("启动参数不完整", "Run 模式仅启动需要填写容器名称。", "error");
+      return;
+    }
+
+    if (profile.mode === "compose") {
+      const composeProfile = {
+        ...profile,
+        git: {
+          ...profile.git,
+          enabled: false,
+        },
+      };
+      const validationError = validateProfileForExecution(composeProfile, "");
+      if (validationError) {
+        showGlobalNotice("启动参数不完整", validationError, "error");
+        return;
+      }
+    }
+
+    const nextState: DeployPipelineState = {
+      running: true,
+      lastRunAt: deployState.pipeline.lastRunAt,
+      lastError: null,
+      summary: "仅启动流程执行中...",
+      steps: createInitialDeploySteps(),
+      logs: [] as DeployStepResult[],
+    };
+    const pullStep = nextState.steps.find((item) => item.step === "pull_code");
+    if (pullStep) {
+      pullStep.status = "skipped";
+      pullStep.message = "已跳过（仅启动）";
+    }
+    const stopStep = nextState.steps.find((item) => item.step === "stop_old");
+    if (stopStep) {
+      stopStep.status = "skipped";
+      stopStep.message = "已跳过（仅启动）";
+    }
+    const deployStep = nextState.steps.find((item) => item.step === "deploy_new");
+    if (deployStep) {
+      deployStep.status = "running";
+      deployStep.message = "执行中...";
+    }
+
+    deployState.setPipeline(nextState);
+    this.refreshPageView();
+
+    let stepResult: DeployStepResult;
+    if (profile.mode === "run") {
+      const containerName = profile.run.containerName.trim();
+      const response = await dockerService.runDockerAction("start", containerName);
+      if (!response.ok || !response.data) {
+        const fallbackCommand = `docker start ${containerName}`;
+        stepResult = {
+          step: "deploy_new",
+          ok: false,
+          skipped: false,
+          commands: [fallbackCommand],
+          output: response.error ?? "命令执行失败",
+          error: response.error ?? "命令执行失败",
+          elapsedMs: response.elapsedMs,
+        };
+      } else {
+        stepResult = this.buildDeployLogFromDockerResult(response.data, response.elapsedMs);
+      }
+    } else {
+      const response = await deployService.executeDeployStep({
+        profile: {
+          ...profile,
+          git: {
+            ...profile.git,
+            enabled: false,
+          },
+        },
+        step: "deploy_new",
+        selectedBranch: null,
+      });
+      if (!response.ok || !response.data) {
+        stepResult = {
+          step: "deploy_new",
+          ok: false,
+          skipped: false,
+          commands: [],
+          output: response.error ?? "命令执行失败",
+          error: response.error ?? "命令执行失败",
+          elapsedMs: response.elapsedMs,
+        };
+      } else {
+        stepResult = response.data;
+      }
+    }
+
+    nextState.logs = [stepResult];
+    if (deployStep) {
+      deployStep.status = stepResult.ok ? "success" : "failed";
+      deployStep.message = stepResult.ok ? "执行成功" : stepResult.error ?? "执行失败";
+    }
+
+    nextState.running = false;
+    nextState.lastRunAt = Date.now();
+
+    if (!stepResult.ok) {
+      const failedMessage = `仅启动失败：${stepResult.error ?? "命令执行失败"}`;
+      nextState.lastError = failedMessage;
+      nextState.summary = failedMessage;
+      deployState.setPipeline(nextState);
+      this.refreshPageView();
+      showGlobalNotice("启动失败", failedMessage, "error");
+      this.openDeployLogsInDrawer();
+      return;
+    }
+
+    nextState.lastError = null;
+    nextState.summary = `仅启动完成：${profile.name}`;
+    deployState.setPipeline(nextState);
+    this.refreshPageView();
+
+    const targetText = profile.mode === "run" ? `容器 ${profile.run.containerName.trim()}` : "Compose 服务";
+    showGlobalNotice("启动完成", `${profile.name} 已完成仅启动（${targetText}）。`, "success");
+    await this.refreshOverviewWithUiSync("quick");
+  }
+
+  private buildDeployLogFromDockerResult(
+    result: { command: string; stdout: string; stderr: string; exitCode: number },
+    elapsedMs: number
+  ): DeployStepResult {
+    const output = this.formatDockerCommandOutput(result.command, result.stdout, result.stderr, result.exitCode);
+    const detail = [result.stderr.trim(), result.stdout.trim()].find((item) => item.length > 0) ?? "命令执行失败";
+
+    return {
+      step: "deploy_new",
+      ok: result.exitCode === 0,
+      skipped: false,
+      commands: [result.command],
+      output,
+      error: result.exitCode === 0 ? null : detail,
+      elapsedMs,
+    };
+  }
+
+  private formatDockerCommandOutput(command: string, stdout: string, stderr: string, exitCode: number): string {
+    const stderrSection = stderr ? `\n\n[stderr]\n${stderr}` : "";
+    return `[${command}]\nexit=${exitCode}\n\n${stdout || "(无输出)"}${stderrSection}`;
+  }
+
+  private confirmDeployPipelineRisk(profile: DeployProfile, selectedBranch: string, mode: DeployWorkflowMode): boolean {
+    if (profile.mode !== "run" || mode !== "pull_and_start") {
       return true;
     }
 
     const lines: string[] = [
-      "⚠️ 即将执行一键自动部署（Run 模式）",
+      "⚠️ 即将执行拉取新代码并启动（Run 模式）",
       "本次会先强制删除旧容器，再启动新容器。",
       `- 容器名称：${profile.run.containerName.trim() || "(未设置)"}`,
     ];
@@ -409,8 +692,21 @@ export class DockerPage {
     const primarySafeAction = safe[0] ?? null;
     const danger = DANGER_DOCKER_ACTIONS.filter((action) => getDockerActionMeta(action)?.supportKinds.includes(entry.kind));
 
+    // Version management block for images
+    let versionBlock = "";
+    if (entry.kind === "image") {
+      const imageKey = `${entry.title}:${entry.subtitle}`;
+      const checkResult = dockerVersionState.getCheckResult(imageKey);
+      const checking = dockerVersionState.isChecking(imageKey);
+      const updating = dockerVersionState.isUpdating(imageKey);
+      const imageState = dockerVersionState.byImageKey[imageKey];
+      const progressLogs = imageState?.progressLogs || [];
+      versionBlock = renderVersionManagementBlock(imageKey, checkResult, checking, updating, progressLogs);
+    }
+
     return `
       <div class="docker-workbench-detail-card">
+        ${versionBlock}
         <div class="docker-workbench-detail-head"><h3 class="docker-workbench-detail-title">${escapeHtml(entry.title)}</h3><span class="badge badge-info">${TAB_LABEL[entry.kind]}</span></div>
         <div class="docker-workbench-detail-subtitle">${escapeHtml(entry.subtitle)}</div>
         <div class="docker-workbench-detail-meta">${this.renderDetailMeta(entry.kind, entry.key)}</div>
@@ -572,8 +868,13 @@ export class DockerPage {
           return;
         }
 
-        if (action === "run-pipeline") {
-          await this.runDeployPipeline();
+        if (action === "run-start-only") {
+          await this.runDeployPipeline("start_only");
+          return;
+        }
+
+        if (action === "run-pull-and-start" || action === "run-pipeline") {
+          await this.runDeployPipeline("pull_and_start");
           return;
         }
 
@@ -591,6 +892,10 @@ export class DockerPage {
       if (target.closest("[data-docker-output-toggle]")) {
         dockerState.outputDrawerOpen = !dockerState.outputDrawerOpen;
         this.refreshPageView();
+        return;
+      }
+      if (target.closest("[data-docker-copy-output]")) {
+        await this.copyOutputToClipboard();
         return;
       }
       if (target.closest("[data-docker-drawer-close]")) {
@@ -643,6 +948,99 @@ export class DockerPage {
         dockerState.selected = { kind, key };
         dockerState.dangerConfirm = null;
         this.requestPanelSectionUpdate();
+        return;
+      }
+
+      // Version management actions
+      const sourceModalOverlay = target.closest<HTMLElement>("#version-source-modal");
+      if (sourceModalOverlay && target === sourceModalOverlay) {
+        this.closeVersionSourceModal();
+        return;
+      }
+
+      const sourceModalCloseBtn = target.closest<HTMLButtonElement>("#version-source-modal [data-modal-close]");
+      if (sourceModalCloseBtn) {
+        this.closeVersionSourceModal();
+        return;
+      }
+
+      // Close modal when clicking overlay (outside modal content)
+      const modalOverlay = target.closest<HTMLElement>("#version-source-modal.modal-overlay");
+      if (modalOverlay && target === modalOverlay) {
+        this.closeVersionSourceModal();
+        return;
+      }
+
+      const sourceConfigBtn = target.closest<HTMLButtonElement>("[data-version-source-config]");
+      if (sourceConfigBtn) {
+        const imageKey = sourceConfigBtn.dataset.versionSourceConfig;
+        if (!imageKey) return;
+        this.openVersionSourceModal(imageKey);
+        return;
+      }
+
+      const sourceConfirmBtn = target.closest<HTMLButtonElement>("[data-version-check-confirm]");
+      if (sourceConfirmBtn) {
+        const modal = document.getElementById("version-source-modal");
+        if (!modal) {
+          showGlobalNotice("配置未生效", "未找到配置弹窗，请重新打开版本源配置。", "error", 2600);
+          return;
+        }
+
+        const imageKey = modal.dataset.imageKey;
+        if (!imageKey) {
+          showGlobalNotice("配置未生效", "未识别当前镜像，请重新打开版本源配置。", "error", 2600);
+          return;
+        }
+
+        const selectedSources = Array.from(
+          modal.querySelectorAll<HTMLInputElement>('input[name="version-source"]:checked')
+        ).map((input) => input.value as VersionSourceKind);
+
+        if (selectedSources.length === 0) {
+          showGlobalNotice("请选择版本源", "至少启用一个版本源后再执行检查。", "error", 2600);
+          return;
+        }
+
+        // Disable button and show loading state
+        sourceConfirmBtn.disabled = true;
+        const originalHtml = sourceConfirmBtn.innerHTML;
+        sourceConfirmBtn.innerHTML = `
+          <svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+          <span>处理中...</span>
+        `;
+
+        try {
+          const sources = this.buildVersionSources(imageKey, selectedSources);
+          versionConfigStorage.saveConfig({ imageKey, sources });
+          this.closeVersionSourceModal();
+          await this.handleVersionCheck(imageKey, sources);
+        } catch (error) {
+          // Restore button state on error
+          sourceConfirmBtn.disabled = false;
+          sourceConfirmBtn.innerHTML = originalHtml;
+          showGlobalNotice("操作失败", String(error), "error", 3000);
+        }
+        return;
+      }
+
+      const versionCheckBtn = target.closest<HTMLButtonElement>("[data-version-check]");
+      if (versionCheckBtn) {
+        const imageKey = versionCheckBtn.dataset.versionCheck;
+        if (!imageKey) return;
+        await this.handleVersionCheck(imageKey);
+        return;
+      }
+
+      const versionUpdateBtn = target.closest<HTMLButtonElement>("[data-version-update]");
+      if (versionUpdateBtn) {
+        const imageKey = versionUpdateBtn.dataset.versionUpdate;
+        const targetVersion = versionUpdateBtn.dataset.versionTarget;
+        const source = versionUpdateBtn.dataset.versionSource;
+        if (!imageKey || !targetVersion || !source) return;
+        await this.handleVersionUpdate(imageKey, targetVersion, source as VersionSourceKind);
         return;
       }
 
@@ -1011,6 +1409,291 @@ export class DockerPage {
     return getDockerActionMeta(value as DockerActionType) !== undefined;
   }
 
+  private ensureVersionCheckLockHost(): HTMLElement {
+    const existing = document.getElementById(DOCKER_VERSION_LOCK_ID);
+    if (existing) {
+      return existing;
+    }
+
+    const host = document.createElement("div");
+    host.id = DOCKER_VERSION_LOCK_ID;
+    host.className = "app-interaction-lock";
+    host.innerHTML = `
+      <div class="app-interaction-lock-panel" role="status" aria-live="polite">
+        <span class="app-interaction-lock-spinner" aria-hidden="true"></span>
+        <span class="app-interaction-lock-text" data-lock-message>正在检查版本源，请稍候...</span>
+      </div>
+    `;
+    document.body.appendChild(host);
+    return host;
+  }
+
+  private setVersionCheckLock(locked: boolean, message?: string): void {
+    const host = this.ensureVersionCheckLockHost();
+    const messageEl = host.querySelector<HTMLElement>("[data-lock-message]");
+    if (messageEl && message) {
+      messageEl.textContent = message;
+    }
+    host.classList.toggle("is-active", locked);
+  }
+
+  private getDefaultVersionSources(imageKey: string): VersionSourceConfig[] {
+    const repository = imageKey.split(":")[0] || imageKey;
+    return [
+      {
+        kind: "dockerHub",
+        config: {
+          namespace: "library",
+          repository,
+          includePrerelease: false,
+        },
+      },
+      {
+        kind: "localGit",
+        config: {
+          repoPath: ".",
+          branch: "main",
+        },
+      },
+    ];
+  }
+
+  private getConfiguredVersionSources(imageKey: string): VersionSourceConfig[] {
+    const config = versionConfigStorage.getConfig(imageKey);
+    if (config?.sources && config.sources.length > 0) {
+      return config.sources;
+    }
+    return this.getDefaultVersionSources(imageKey);
+  }
+
+  private getConfiguredSourceKinds(imageKey: string): VersionSourceKind[] {
+    const sources = this.getConfiguredVersionSources(imageKey);
+    const kinds = sources.map((item) => item.kind);
+    return kinds.length > 0 ? kinds : ["dockerHub", "localGit"];
+  }
+
+  private buildVersionSources(imageKey: string, kinds: VersionSourceKind[]): VersionSourceConfig[] {
+    const repository = imageKey.split(":")[0] || imageKey;
+    const repoParts = repository.split("/").filter((part) => part.length > 0);
+    const owner = repoParts.length > 1 ? repoParts[0] : "final00000000";
+    const repo = repoParts.length > 1 ? repoParts[repoParts.length - 1] : (repoParts[0] || repository);
+
+    return kinds.map((kind) => {
+      if (kind === "dockerHub") {
+        return {
+          kind: "dockerHub",
+          config: {
+            namespace: "library",
+            repository,
+            includePrerelease: false,
+          },
+        } as VersionSourceConfig;
+      }
+
+      if (kind === "githubRelease") {
+        return {
+          kind: "githubRelease",
+          config: {
+            owner,
+            repo,
+            includePrerelease: false,
+          },
+        } as VersionSourceConfig;
+      }
+
+      if (kind === "localGit") {
+        return {
+          kind: "localGit",
+          config: {
+            repoPath: ".",
+            branch: "main",
+          },
+        } as VersionSourceConfig;
+      }
+
+      return {
+        kind: "customApi",
+        config: {
+          endpoint: "https://example.com/version",
+          method: "GET",
+          headers: [],
+          versionField: "version",
+          notesField: "notes",
+          publishedAtField: "publishedAt",
+        },
+      } as VersionSourceConfig;
+    });
+  }
+
+  private openVersionSourceModal(imageKey: string): void {
+    this.closeVersionSourceModal();
+
+    const root = document.querySelector(".docker-page");
+    if (!root) return;
+
+    const html = renderSourceSelectionModalWithPreset(imageKey, this.getConfiguredSourceKinds(imageKey));
+    root.insertAdjacentHTML("beforeend", html);
+
+    // Use requestAnimationFrame to ensure DOM is ready before setting dataset
+    requestAnimationFrame(() => {
+      const modal = document.getElementById("version-source-modal");
+      if (modal) {
+        modal.dataset.imageKey = imageKey;
+
+        // Add ESC key listener to close modal
+        this.modalEscHandler = (e: KeyboardEvent) => {
+          if (e.key === "Escape") {
+            this.closeVersionSourceModal();
+          }
+        };
+        document.addEventListener("keydown", this.modalEscHandler);
+
+        // Focus first checkbox for better accessibility
+        const firstCheckbox = modal.querySelector<HTMLInputElement>('input[type="checkbox"]');
+        if (firstCheckbox) {
+          firstCheckbox.focus();
+        }
+      }
+    });
+  }
+
+  private closeVersionSourceModal(): void {
+    const modal = document.getElementById("version-source-modal");
+    if (modal) {
+      modal.remove();
+    }
+
+    // Remove ESC key listener if it exists
+    if (this.modalEscHandler) {
+      document.removeEventListener("keydown", this.modalEscHandler);
+      this.modalEscHandler = null;
+    }
+  }
+
+  private isSourceConfigurationError(errorText: string): boolean {
+    return /No valid source result|所有版本源检查失败|no valid source/i.test(errorText);
+  }
+
+  private formatVersionCheckError(errorText: string): string {
+    if (this.isSourceConfigurationError(errorText)) {
+      return "所有版本源检查失败。请点击“配置源”重新选择可用版本源后重试。";
+    }
+    return errorText || "未知错误";
+  }
+
+  private async handleVersionCheck(imageKey: string, overrideSources?: VersionSourceConfig[]): Promise<void> {
+    let shouldOpenModal = false;
+
+    try {
+      this.setVersionCheckLock(true, "正在检查版本源，其他操作已临时锁定...");
+      dockerVersionState.setChecking(imageKey, true);
+      dockerState.panelNeedsRefresh = true;
+      this.refreshPageView();
+      showGlobalNotice("版本检查", "正在检查版本源，请稍候...", "info", 1200);
+
+      const sources = overrideSources ?? this.getConfiguredVersionSources(imageKey);
+
+      const response = await dockerVersionService.checkImageVersion(imageKey, sources);
+
+      if (response.ok && response.data) {
+        dockerVersionState.setCheckResult(imageKey, response.data);
+        dockerState.panelNeedsRefresh = true;
+        this.refreshPageView();
+        if (response.data.hasUpdate) {
+          showGlobalNotice("发现新版本", `镜像 ${imageKey} 有新版本可用`, "info", 3000);
+        } else {
+          showGlobalNotice("已是最新版本", `镜像 ${imageKey} 当前已是最新版本`, "success", 2000);
+        }
+      } else {
+        const rawError = response.error || "未知错误";
+        const errorMessage = this.formatVersionCheckError(rawError);
+        showGlobalNotice("版本检查失败", errorMessage, "error");
+
+        if (this.isSourceConfigurationError(rawError)) {
+          const shouldReconfigure = window.confirm(
+            "版本源检查全部失败。\n\n是否现在重新配置版本源并重试？"
+          );
+          if (shouldReconfigure) {
+            shouldOpenModal = true;
+          }
+        }
+      }
+    } catch (error) {
+      const rawError = String(error);
+      const errorMessage = this.formatVersionCheckError(rawError);
+      showGlobalNotice("版本检查失败", errorMessage, "error");
+      if (this.isSourceConfigurationError(rawError)) {
+        const shouldReconfigure = window.confirm(
+          "版本源检查全部失败。\n\n是否现在重新配置版本源并重试？"
+        );
+        if (shouldReconfigure) {
+          shouldOpenModal = true;
+        }
+      }
+    } finally {
+      dockerVersionState.setChecking(imageKey, false);
+      dockerState.panelNeedsRefresh = true;
+
+      // Open modal immediately if needed, before refreshPageView
+      if (shouldOpenModal) {
+        requestAnimationFrame(() => {
+          this.openVersionSourceModal(imageKey);
+        });
+      }
+
+      this.refreshPageView();
+      this.setVersionCheckLock(false);
+    }
+  }
+
+  private async handleVersionUpdate(imageKey: string, targetVersion: string, source: VersionSourceKind): Promise<void> {
+    const confirmed = window.confirm(
+      `确认更新镜像 ${imageKey} 到版本 ${targetVersion}？\n\n此操作将执行：\n1. 拉取最新代码 (git pull)\n2. 构建新镜像 (docker build)\n3. 备份旧容器 (backup)\n4. 启动新容器 (docker run)\n5. 健康检查 (health check)\n\n如果更新失败，将自动回滚到旧版本。`
+    );
+
+    if (!confirmed) {
+      showGlobalNotice("已取消更新", "你取消了镜像更新操作", "info", 2000);
+      return;
+    }
+
+    try {
+      dockerVersionState.setUpdating(imageKey, true);
+      dockerVersionState.clearProgressLogs(imageKey);
+      this.refreshPageView();
+
+      const response = await dockerVersionService.updateImageAndRestart(imageKey, targetVersion, source);
+
+      if (response.ok && response.data) {
+        response.data.stepLogs.forEach((log: UpdateStepLog) => {
+          dockerVersionState.addProgressLog(imageKey, log);
+        });
+
+        if (response.data.success) {
+          showGlobalNotice("更新成功", `镜像 ${imageKey} 已成功更新到 ${targetVersion}`, "success", 3000);
+          await this.refreshOverviewWithUiSync("quick");
+        } else {
+          const errorMsg = response.data.stepLogs.find((log: UpdateStepLog) => !log.ok)?.error || "更新失败";
+          if (response.data.rollback.attempted) {
+            if (response.data.rollback.restored) {
+              showGlobalNotice("更新失败，已回滚", `${errorMsg}\n已成功回滚到旧版本`, "info");
+            } else {
+              showGlobalNotice("更新失败，回滚失败", `${errorMsg}\n回滚失败: ${response.data.rollback.error}`, "error");
+            }
+          } else {
+            showGlobalNotice("更新失败", errorMsg, "error");
+          }
+        }
+      } else {
+        showGlobalNotice("更新失败", response.error || "未知错误", "error");
+      }
+    } catch (error) {
+      showGlobalNotice("更新异常", String(error), "error");
+    } finally {
+      dockerVersionState.setUpdating(imageKey, false);
+      this.refreshPageView();
+    }
+  }
+
   cleanup(): void {
     this.removeManagedListeners(this.pageListeners);
     this.debouncedUpdatePanel.cancel();
@@ -1025,6 +1708,10 @@ export class DockerPage {
     this.summaryCardsCache = null;
     this.lastSummaryFingerprint = null;
     this.lastDeployFingerprint = null;
+
+    // Clean up modal and ESC key handler
+    this.closeVersionSourceModal();
+
     if (import.meta.env.DEV) MemoryMonitor.getInstance().logMemorySnapshot("DockerPage cleanup");
   }
 }

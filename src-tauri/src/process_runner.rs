@@ -131,7 +131,7 @@ fn needs_cmd_wrapper(command: &str) -> bool {
             return true;
         }
         // npm/pnpm/yarn 等在 Windows 上实际是 .cmd 脚本
-        matches!(lower.as_str(), "npm" | "pnpm" | "yarn" | "npx" | "bun" | "deno" | "pip" | "pipx" | "uv" | "conda" | "flutter" | "dart" | "az" | "gcloud" | "gemini" | "codex")
+        matches!(lower.as_str(), "npm" | "pnpm" | "yarn" | "npx" | "bun" | "deno" | "pip" | "pipx" | "uv" | "conda" | "flutter" | "dart" | "az" | "gcloud" | "gemini" | "codex" | "code" | "claude")
     }
     #[cfg(not(target_os = "windows"))]
     {

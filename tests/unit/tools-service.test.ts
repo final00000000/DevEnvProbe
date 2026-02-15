@@ -53,15 +53,33 @@ describe('ToolsService', () => {
     expect(toolsState.lastScanElapsedMs).toBe(180);
   });
 
-  it('refreshing 状态下应直接返回已有缓存结果', async () => {
-    toolsState.refreshing = true;
-    toolsState.dataCache = [
-      { name: 'Node', command: 'node', category: 'Runtime', installed: true, version: 'v20', details: null, installKey: null },
-    ] as any;
+  it('并发刷新应复用同一个 in-flight Promise（单飞）', async () => {
+    let resolveInvoke!: (value: unknown) => void;
+    (invoke as any).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveInvoke = resolve;
+        })
+    );
 
-    const ok = await service.refreshCache(true);
-    expect(ok).toBe(true);
-    expect(invoke).not.toHaveBeenCalled();
+    const firstPromise = service.refreshCacheDetailed(true);
+    const secondPromise = service.refreshCacheDetailed(true);
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+
+    resolveInvoke({
+      ok: true,
+      data: [
+        { name: 'Node', command: 'node', category: 'Runtime', installed: true, version: 'v20', details: null, installKey: null },
+      ],
+      error: null,
+      elapsedMs: 100,
+    });
+
+    const [firstResult, secondResult] = await Promise.all([firstPromise, secondPromise]);
+    expect(firstResult).toStrictEqual(secondResult);
+    expect(firstResult.ok).toBe(true);
+    expect(firstResult.retried).toBe(false);
   });
 
   it('缓存未过期且非强制刷新时不应重复调用 invoke', async () => {
@@ -86,13 +104,14 @@ describe('ToolsService', () => {
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain('调用异常');
+    expect(result.errorType).toBe('fatal');
     expect(result.usedCache).toBe(false);
     expect(result.retried).toBe(true);
     expect(toolsState.refreshFailCount).toBe(1);
     expect(toolsState.lastRefreshError).toContain('调用异常');
   });
 
-  it('refreshCacheDetailed 失败时有缓存应回退缓存并标记 usedCache', async () => {
+  it('refreshCacheDetailed 失败时有缓存应回退缓存并标记 transient', async () => {
     vi.useFakeTimers();
     toolsState.dataCache = [
       { name: 'Node', command: 'node', category: 'Runtime', installed: true, version: 'v20', details: null, installKey: null },
@@ -109,10 +128,30 @@ describe('ToolsService', () => {
     await vi.runAllTimersAsync();
     const result = await resultPromise;
 
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
     expect(result.usedCache).toBe(true);
+    expect(result.errorType).toBe('transient');
     expect(result.error).toContain('detect failed');
     expect(toolsState.dataCache.length).toBe(1);
+  });
+
+  it('refreshCacheDetailed 失败且无缓存时应标记 fatal', async () => {
+    vi.useFakeTimers();
+    (invoke as any).mockResolvedValue({
+      ok: false,
+      data: null,
+      error: 'detect failed without cache',
+      elapsedMs: 0,
+    });
+
+    const resultPromise = service.refreshCacheDetailed(true);
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.ok).toBe(false);
+    expect(result.usedCache).toBe(false);
+    expect(result.errorType).toBe('fatal');
+    expect(result.error).toContain('detect failed without cache');
   });
 
   it('refreshCacheDetailed 首次失败后重试成功应返回 retried=true 并清理错误状态', async () => {

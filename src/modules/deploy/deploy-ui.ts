@@ -48,11 +48,18 @@ function renderDirectoryField(profile: DeployProfile): string {
     `;
   }
 
+  const runRequiresProjectPath = profile.git.enabled || profile.run.imageSource === "build";
+  const runDirectoryLabel = runRequiresProjectPath ? "项目目录（构建/拉代码时必填）" : "项目目录（可选）";
+  const runDirectoryHint = runRequiresProjectPath
+    ? "启用拉取代码或本地构建镜像时，需要可访问的项目目录。"
+    : "仅拉取已有镜像并启动时，可留空该路径。";
+
   return `
     <div class="deploy-field-row deploy-directory-row">
       <label class="deploy-field">
-        <span class="deploy-field-label">项目目录（构建时必填）</span>
+        <span class="deploy-field-label">${runDirectoryLabel}</span>
         <input class="input" data-deploy-field="run.buildContext" value="${escapeHtml(profile.run.buildContext)}" placeholder="D:/workspace/my-app" />
+        <p class="settings-hint">${runDirectoryHint}</p>
       </label>
       <button type="button" class="btn btn-secondary btn-xs" data-deploy-action="choose-run-build-dir">选择目录</button>
     </div>
@@ -192,7 +199,7 @@ export function renderDeployPipelineCard(
       <div class="deploy-header">
         <div>
           <h3 class="text-lg font-semibold text-text-primary">一键部署流水线</h3>
-          <p class="deploy-subtitle">仅拉取代码不会自动更新容器，点击【执行部署】才会更新 Docker 运行实例。</p>
+          <p class="deploy-subtitle">补充工作流：可直接【仅启动】，或执行【拉取新代码并启动】完成更新发布。</p>
         </div>
         <div class="deploy-header-actions">
           <button type="button" class="btn btn-secondary btn-xs" data-deploy-action="add-profile">新增配置</button>
@@ -243,7 +250,7 @@ export function renderDeployPipelineCard(
 
           ${branchError ? `<div class="deploy-inline-error">${escapeHtml(branchError)}</div>` : ""}
 
-          ${profile.mode === "run" ? '<div class="deploy-inline-warning">Run 模式会先删除同名旧容器，再拉取/构建并启动新容器。执行前会弹窗确认。</div>' : ""}
+          ${profile.mode === "run" ? '<div class="deploy-inline-warning">Run 模式会先删除同名旧容器，再拉取/构建并启动新容器。若只想操作已有镜像，可取消“执行前拉取代码”，无需重选项目目录。</div>' : ""}
 
           ${renderAdvancedSection(profile, advancedConfigExpanded)}
         </section>
@@ -253,7 +260,8 @@ export function renderDeployPipelineCard(
           ${renderStepList(pipeline)}
 
           <div class="deploy-runtime-actions">
-            <button type="button" class="btn btn-primary" data-deploy-action="run-pipeline" ${pipeline.running ? "disabled" : ""}>${pipeline.running ? "自动部署执行中..." : "一键自动部署"}</button>
+            <button type="button" class="btn btn-secondary" data-deploy-action="run-start-only" ${pipeline.running ? "disabled" : ""}>${pipeline.running ? "流程执行中..." : "仅启动（不拉取）"}</button>
+            <button type="button" class="btn btn-primary" data-deploy-action="run-pull-and-start" ${pipeline.running ? "disabled" : ""}>${pipeline.running ? "流程执行中..." : "拉取新代码并启动"}</button>
             <button type="button" class="btn btn-secondary" data-deploy-action="view-log" ${pipeline.logs.length === 0 ? "disabled" : ""}>查看部署日志</button>
           </div>
 

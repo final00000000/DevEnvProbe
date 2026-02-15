@@ -270,3 +270,150 @@ export interface MarketMeta {
 }
 
 export type PageKey = "system" | "tools" | "docker" | "settings";
+
+// ============================================================================
+// Version Management Types
+// ============================================================================
+
+export interface ImageSelection {
+  imageId?: string;
+  repository: string;
+  tag: string;
+  containerName?: string;
+  projectPath?: string;
+}
+
+export type VersionSourceKind = "dockerHub" | "githubRelease" | "localGit" | "customApi";
+
+export interface DockerHubSourceConfig {
+  namespace: string;
+  repository: string;
+  includePrerelease: boolean;
+  tagRegex?: string;
+}
+
+export interface GithubReleaseSourceConfig {
+  owner: string;
+  repo: string;
+  includePrerelease: boolean;
+  token?: string;
+}
+
+export interface LocalGitSourceConfig {
+  repoPath: string;
+  branch: string;
+  versionFile?: string;
+}
+
+export interface CustomApiSourceConfig {
+  endpoint: string;
+  method: string;
+  headers: HttpHeaderPair[];
+  versionField: string;
+  notesField?: string;
+  publishedAtField?: string;
+}
+
+export interface HttpHeaderPair {
+  key: string;
+  value: string;
+}
+
+export type VersionSourceConfig =
+  | { kind: "dockerHub"; config: DockerHubSourceConfig }
+  | { kind: "githubRelease"; config: GithubReleaseSourceConfig }
+  | { kind: "localGit"; config: LocalGitSourceConfig }
+  | { kind: "customApi"; config: CustomApiSourceConfig };
+
+export interface CheckImageVersionRequest {
+  image: ImageSelection;
+  sources: VersionSourceConfig[];
+  timeoutMs?: number;
+  overallTimeoutMs?: number;
+}
+
+export interface VersionCandidate {
+  source: VersionSourceKind;
+  version: string;
+  digest?: string;
+  releaseNotes?: string;
+  publishedAt?: string;
+  rawReference?: string;
+}
+
+export interface SourceCheckResult {
+  source: VersionSourceKind;
+  ok: boolean;
+  errorCode?: string;
+  errorMessage?: string;
+  latest?: VersionCandidate;
+  elapsedMs: number;
+}
+
+export interface CheckImageVersionResponse {
+  imageKey: string;
+  currentVersion?: string;
+  hasUpdate: boolean;
+  recommended?: VersionCandidate;
+  results: SourceCheckResult[];
+  checkedAtMs: number;
+}
+
+export interface UpdateWorkflowConfig {
+  gitPullPath: string;
+  gitBranch: string;
+  buildContext: string;
+  dockerfile: string;
+  newImageTag: string;
+  runArgs: string[];
+  healthCheckCmd?: string[];
+}
+
+export interface UpdateTimeoutConfig {
+  gitPullMs: number;
+  dockerBuildMs: number;
+  dockerStopMs: number;
+  dockerRunMs: number;
+  healthCheckMs: number;
+}
+
+export interface RollbackPolicy {
+  enabled: boolean;
+  keepBackupMinutes: number;
+}
+
+export interface UpdateImageAndRestartRequest {
+  operationId?: string;
+  image: ImageSelection;
+  source: VersionSourceKind;
+  targetVersion: string;
+  workflow: UpdateWorkflowConfig;
+  timeouts: UpdateTimeoutConfig;
+  rollback: RollbackPolicy;
+}
+
+export interface UpdateStepLog {
+  step: string;
+  command?: string;
+  ok: boolean;
+  skipped: boolean;
+  output: string;
+  error?: string;
+  elapsedMs: number;
+}
+
+export interface RollbackResult {
+  attempted: boolean;
+  restored: boolean;
+  backupContainer?: string;
+  error?: string;
+}
+
+export interface UpdateImageAndRestartResponse {
+  operationId: string;
+  imageKey: string;
+  success: boolean;
+  finalImageRef?: string;
+  stepLogs: UpdateStepLog[];
+  rollback: RollbackResult;
+}

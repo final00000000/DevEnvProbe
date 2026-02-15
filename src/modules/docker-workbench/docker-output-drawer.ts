@@ -8,6 +8,8 @@ export interface DockerOutputDrawerOptions {
 }
 
 export function renderDockerOutputDrawer(options: DockerOutputDrawerOptions): string {
+  const canCopy = options.output.trim().length > 0;
+
   return `
     <aside class="docker-workbench-output-drawer ${options.open ? "is-open" : ""}" id="docker-output-drawer" aria-hidden="${
       options.open ? "false" : "true"
@@ -17,7 +19,10 @@ export function renderDockerOutputDrawer(options: DockerOutputDrawerOptions): st
           <div class="text-xs text-text-muted">命令输出</div>
           <div class="text-sm text-text-primary">${escapeHtml(options.status)}</div>
         </div>
-        <button type="button" class="btn btn-secondary btn-xs" data-docker-drawer-close>收起</button>
+        <div class="docker-workbench-output-head-actions">
+          <button type="button" class="btn btn-secondary btn-xs" data-docker-copy-output ${canCopy ? "" : "disabled"}>复制</button>
+          <button type="button" class="btn btn-secondary btn-xs" data-docker-drawer-close>收起</button>
+        </div>
       </div>
       <div class="docker-workbench-output-meta text-xs text-text-muted">${escapeHtml(options.lastCommand || "尚未执行")}</div>
       <pre id="docker-output" class="docker-output custom-scrollbar">${escapeHtml(options.output)}</pre>

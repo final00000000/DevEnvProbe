@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ToolsPage } from "../../src/pages/ToolsPage";
+import { ToolsPage } from "../../src/pages/tools";
 import { appState, toolsState } from "../../src/state";
 import { toolsService } from "../../src/services";
 
@@ -64,7 +64,7 @@ describe("ToolsPage 软超时加载", () => {
     await renderPromise;
   });
 
-  it("已有缓存且软超时触发时应在条目中显示加载框", () => {
+  it("已有缓存且软超时触发时应在条目中显示加载框", async () => {
     const page = new ToolsPage();
     const container = document.createElement("div");
     document.body.innerHTML = "";
@@ -86,7 +86,7 @@ describe("ToolsPage 软超时加载", () => {
     toolsState.refreshing = true;
     toolsState.scanSoftTimeoutActive = true;
 
-    page.renderWithData(container);
+    await page.render(container, 0);
 
     expect(container.querySelector(".tool-scan-loading")).not.toBeNull();
   });

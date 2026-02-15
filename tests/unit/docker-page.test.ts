@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DOCKER_SEARCH_DEBOUNCE_MS } from "../../src/constants/config";
-import { DockerPage } from "../../src/pages/DockerPage";
+import { DockerPage } from "../../src/pages/docker/DockerPage";
 import { appState, dockerState } from "../../src/state";
 import { dockerService } from "../../src/services";
 
@@ -69,6 +69,32 @@ describe("DockerPage 工作台", () => {
     expect(content.querySelector(".docker-workbench-left")).not.toBeNull();
     expect(content.querySelector(".docker-workbench-right")).not.toBeNull();
     expect(content.querySelectorAll("[data-docker-select-key]").length).toBeGreaterThan(0);
+  });
+
+  it("日志抽屉复制按钮应调用剪贴板 API", async () => {
+    const page = new DockerPage();
+    const content = document.getElementById("content") as HTMLElement;
+    const writeText = vi.fn().mockResolvedValue(undefined);
+
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText,
+      },
+    });
+
+    dockerState.outputDrawerOpen = true;
+    dockerState.output = "test-log-content";
+
+    await page.render(content);
+
+    const copyBtn = content.querySelector("[data-docker-copy-output]") as HTMLButtonElement;
+    expect(copyBtn).not.toBeNull();
+
+    copyBtn.click();
+    await Promise.resolve();
+
+    expect(writeText).toHaveBeenCalledWith("test-log-content");
   });
 
   it("cleanup 应移除监听并取消防抖", async () => {

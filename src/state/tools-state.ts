@@ -93,6 +93,12 @@ export class ToolsState {
   /** 工具自动刷新定时器 */
   autoRefreshTimer: number | null = null;
 
+  /** winget 是否可用（null 表示未检查） */
+  wingetAvailable: boolean | null = null;
+
+  /** 是否正在安装前置条件 */
+  prerequisiteInstalling = false;
+
   /**
    * 清除所有定时器
    */

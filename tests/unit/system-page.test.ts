@@ -85,6 +85,36 @@ describe('SystemPage', () => {
     expect(container.querySelector('#system-snapshot-elapsed')?.textContent).toBe('55ms');
   });
 
+  it('已有仪表盘时全量快照刷新应保持根节点不重建（防闪烁）', async () => {
+    const page = new SystemPage();
+    const container = document.createElement('div');
+    const baseSnapshot = createSnapshot();
+
+    (page as any).renderWithSnapshot(container, baseSnapshot, 10);
+    systemState.snapshotCache = baseSnapshot;
+
+    const dashboardBefore = container.querySelector('#system-dashboard');
+    expect(dashboardBefore).not.toBeNull();
+
+    vi.spyOn(systemService, 'isSnapshotFresh').mockReturnValue(false);
+    vi.spyOn(systemService, 'fetchSystemSnapshot').mockResolvedValue({
+      ok: true,
+      data: {
+        ...baseSnapshot,
+        cpuUsagePercent: 47,
+        sampledAtMs: Date.now(),
+      },
+      error: null,
+      elapsedMs: 66,
+    });
+
+    await page.render(container, 0);
+
+    const dashboardAfter = container.querySelector('#system-dashboard');
+    expect(dashboardAfter).toBe(dashboardBefore);
+    expect(container.querySelector('.metric-card .metric-value')?.textContent).toContain('47');
+  });
+
   it('CPU 提示图标点击应弹出说明弹框', async () => {
     const page = new SystemPage();
     const container = document.createElement('div');

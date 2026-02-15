@@ -3,5 +3,5 @@
  */
 
 export { SystemPage, systemPage } from "./SystemPage";
-export { ToolsPage, toolsPage } from "./ToolsPage";
-export { DockerPage, dockerPage } from "./DockerPage";
+export { ToolsPage, toolsPage } from "./tools";
+export { DockerPage, dockerPage } from "./docker";

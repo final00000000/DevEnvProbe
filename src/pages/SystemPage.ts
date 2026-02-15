@@ -76,14 +76,18 @@ export class SystemPage {
         systemState.bootstrapStatus = "partial";
         systemState.bootstrapError = errorMessage;
       } else {
-        systemState.bootstrapStatus = "error";
-        systemState.bootstrapError = errorMessage;
-        this.renderBootstrapState(container, {
-          kind: "error",
-          title: "系统信息获取失败",
-          detail: errorMessage,
-          showRetry: true,
-        });
+        // Error 态粘住：避免重复渲染同一错误状态
+        const currentKind = container.querySelector<HTMLElement>("#system-bootstrap-state")?.dataset.bootstrapKind;
+        if (currentKind !== "error" || systemState.bootstrapError !== errorMessage) {
+          systemState.bootstrapStatus = "error";
+          systemState.bootstrapError = errorMessage;
+          this.renderBootstrapState(container, {
+            kind: "error",
+            title: "系统信息获取失败",
+            detail: errorMessage,
+            showRetry: true,
+          });
+        }
       }
       return;
     }
@@ -91,6 +95,14 @@ export class SystemPage {
     systemState.bootstrapStatus = "ready";
     systemState.bootstrapError = null;
     systemState.bootstrapStartedAt = 0;
+
+    const hasRenderedDashboard = container.querySelector("#system-dashboard") !== null;
+    if (hasRenderedDashboard) {
+      this.patchDashboardWithSnapshot(container, response.data, response.elapsedMs);
+      this.renderAnchoredUptimeIfVisible();
+      return;
+    }
+
     this.renderWithSnapshot(container, response.data, response.elapsedMs);
     this.renderAnchoredUptimeIfVisible();
   }
@@ -111,9 +123,7 @@ export class SystemPage {
     const diskCardSubtitle = diskCount > 0 ? "已挂载" : shouldShowOverviewLoading ? "正在采集中..." : "未检测到";
     const cpuTopologyText = this.buildCpuTopologyText(snapshot);
     const elapsedText = elapsedMs > 0 ? `${elapsedMs}ms` : "--";
-    const overviewLoadingBlock = shouldShowOverviewLoading
-      ? '<div class="system-overview-loading"><span class="system-overview-loading-dot" aria-hidden="true"></span><span>正在获取完整系统信息，请稍候...</span></div>'
-      : "";
+    const overviewLoadingBlock = this.getOverviewLoadingBlock(shouldShowOverviewLoading);
 
     const topCards = [
       getMetricCard("CPU 占用", formatPercent(cpuUsagePercent, true), cpuSamplingHint, "metric-trend-up", true),
@@ -124,38 +134,7 @@ export class SystemPage {
 
     const trendCards = getSystemTrendCardsHtml(systemState.trendState);
 
-    const diskBlocks = snapshot.disks.length > 0
-      ? snapshot.disks
-          .map((disk: any) => {
-            return `
-        <div class="card animate-fade-in">
-          <div class="flex items-center justify-between mb-3">
-            <h4 class="font-semibold text-text-primary">磁盘 ${escapeHtml(disk.name)}</h4>
-            <span class="badge ${getBadgeClassByUsage(disk.usagePercent)}">${formatPercent(disk.usagePercent)}</span>
-          </div>
-          <div class="space-y-2 text-sm">
-            <div class="flex justify-between"><span class="text-text-secondary">挂载点</span><span class="text-text-primary">${escapeHtml(
-              disk.mountPoint
-            )}</span></div>
-            <div class="flex justify-between"><span class="text-text-secondary">总容量</span><span class="text-text-primary">${formatGb(
-              disk.totalGb
-            )}</span></div>
-            <div class="flex justify-between"><span class="text-text-secondary">已使用</span><span class="text-text-primary">${formatGb(
-              disk.usedGb
-            )}</span></div>
-            <div class="w-full bg-bg-tertiary rounded-full h-2 mt-2">
-              <div class="h-2 rounded-full ${getProgressColorClass(
-                disk.usagePercent
-              )}" style="width: ${Math.min(100, Math.max(0, disk.usagePercent))}%"></div>
-            </div>
-          </div>
-        </div>
-      `;
-          })
-          .join("")
-      : `<div class="card animate-fade-in col-span-3"><div class="text-sm text-text-secondary">${
-          shouldShowOverviewLoading ? "磁盘信息采集中..." : "未检测到磁盘分区信息"
-        }</div></div>`;
+    const diskBlocks = this.buildDiskBlocks(snapshot, shouldShowOverviewLoading);
 
     container.innerHTML = `
     <div id="system-dashboard" class="space-y-5">
@@ -212,6 +191,179 @@ export class SystemPage {
   `;
 
     this.bindCpuSamplingHintTrigger(container);
+  }
+
+  /**
+   * 已渲染仪表盘时，执行无闪烁局部回填
+   */
+  private patchDashboardWithSnapshot(container: HTMLElement, snapshot: SystemSnapshot, elapsedMs: number): void {
+    if (!container.querySelector("#system-dashboard")) {
+      this.renderWithSnapshot(container, snapshot, elapsedMs);
+      return;
+    }
+
+    const diskCount = snapshot.disks.length;
+    const cpuUsagePercent = clampPercent(snapshot.cpuUsagePercent);
+    const memoryUsagePercent = clampPercent(snapshot.memoryUsagePercent);
+    const cpuSamplingHint = this.buildCpuSamplingHint(snapshot);
+    const hasMemoryCapacity = snapshot.totalMemoryGb > 0;
+    const memoryValueText = hasMemoryCapacity ? formatGb(snapshot.usedMemoryGb) : "采集中...";
+    const memorySubtitleText = hasMemoryCapacity ? `总计 ${formatGb(snapshot.totalMemoryGb)}` : "正在读取总内存...";
+    const shouldShowOverviewLoading = this.shouldShowOverviewLoading(snapshot);
+    const diskCardValue = shouldShowOverviewLoading && diskCount === 0 ? "--" : String(diskCount);
+    const diskCardSubtitle = diskCount > 0 ? "已挂载" : shouldShowOverviewLoading ? "正在采集中..." : "未检测到";
+    const cpuTopologyText = this.buildCpuTopologyText(snapshot);
+
+    const metricValues = container.querySelectorAll<HTMLElement>(".metric-card .metric-value");
+    if (metricValues.length >= 4) {
+      metricValues[0].textContent = formatPercent(cpuUsagePercent, true);
+      metricValues[1].textContent = memoryValueText;
+      metricValues[2].textContent = diskCardValue;
+      metricValues[3].textContent = formatUptime(snapshot.uptimeSeconds);
+    }
+
+    const metricSubtitles = container.querySelectorAll<HTMLElement>(".metric-card .text-xs");
+    if (metricSubtitles.length >= 4) {
+      metricSubtitles[0].textContent = cpuSamplingHint;
+      metricSubtitles[1].textContent = memorySubtitleText;
+      metricSubtitles[2].textContent = diskCardSubtitle;
+      metricSubtitles[3].textContent = "系统启动至今";
+    }
+
+    this.patchOverviewField(container, "主机名", snapshot.hostName || "未知");
+    this.patchOverviewField(container, "操作系统", snapshot.osName || "未知");
+    this.patchOverviewField(
+      container,
+      "版本",
+      `${snapshot.osVersion || "未知"}${snapshot.buildNumber ? ` (build ${snapshot.buildNumber})` : ""}`
+    );
+    this.patchOverviewField(container, "架构", snapshot.architecture || "未知");
+    this.patchOverviewField(container, "CPU", snapshot.cpuModel || "未知", snapshot.cpuModel || "未知");
+    this.patchOverviewField(container, "CPU 核心", cpuTopologyText);
+    this.patchOverviewField(container, "采样模式", cpuSamplingHint);
+
+    const sampleHintEl = container.querySelector<HTMLElement>("#system-cpu-sample-hint");
+    if (sampleHintEl) {
+      sampleHintEl.textContent = cpuSamplingHint;
+    }
+
+    const elapsedEl = container.querySelector<HTMLElement>("#system-snapshot-elapsed");
+    if (elapsedEl) {
+      elapsedEl.textContent = elapsedMs > 0 ? `${elapsedMs}ms` : "--";
+    }
+
+    this.syncOverviewLoadingState(container, shouldShowOverviewLoading);
+
+    const healthCard = Array.from(container.querySelectorAll<HTMLElement>(".card")).find((card) => {
+      const title = card.querySelector("h3")?.textContent?.trim();
+      return title === "健康状态";
+    });
+    if (healthCard) {
+      const badges = healthCard.querySelectorAll<HTMLElement>(".badge");
+      if (badges.length >= 2) {
+        badges[0].className = `badge ${getBadgeClassByUsage(cpuUsagePercent)}`;
+        badges[0].textContent = formatPercent(cpuUsagePercent, true);
+        badges[1].className = `badge ${getBadgeClassByUsage(memoryUsagePercent)}`;
+        badges[1].textContent = formatPercent(memoryUsagePercent, true);
+      }
+    }
+
+    const diskGrid = container.querySelector<HTMLElement>("#disk-grid");
+    if (diskGrid) {
+      const nextDiskHtml = this.buildDiskBlocks(snapshot, shouldShowOverviewLoading);
+      if (diskGrid.innerHTML !== nextDiskHtml) {
+        diskGrid.innerHTML = nextDiskHtml;
+      }
+    }
+
+    updateSystemTrendWidgets(container, systemState.trendState, cpuUsagePercent, memoryUsagePercent);
+  }
+
+  private patchOverviewField(container: HTMLElement, labelText: string, valueText: string, title?: string): void {
+    const overviewRows = container.querySelectorAll<HTMLElement>(".card.col-span-2 .space-y-3 .flex.justify-between");
+    for (const row of overviewRows) {
+      const label = row.querySelector(".text-text-secondary")?.textContent?.trim();
+      if (label !== labelText) {
+        continue;
+      }
+
+      const valueEl = row.querySelector<HTMLElement>(".text-text-primary");
+      if (!valueEl) {
+        continue;
+      }
+
+      valueEl.textContent = valueText;
+      if (title !== undefined) {
+        valueEl.title = title;
+      }
+      return;
+    }
+  }
+
+  private syncOverviewLoadingState(container: HTMLElement, shouldShowOverviewLoading: boolean): void {
+    const overviewCard = container.querySelector<HTMLElement>(".card.col-span-2");
+    if (!overviewCard) {
+      return;
+    }
+
+    const existingLoading = overviewCard.querySelector<HTMLElement>(".system-overview-loading");
+    if (shouldShowOverviewLoading) {
+      if (existingLoading) {
+        return;
+      }
+
+      const detailList = overviewCard.querySelector<HTMLElement>(".space-y-3");
+      if (detailList) {
+        detailList.insertAdjacentHTML("beforebegin", this.getOverviewLoadingBlock(true));
+      }
+      return;
+    }
+
+    if (existingLoading) {
+      existingLoading.remove();
+    }
+  }
+
+  private getOverviewLoadingBlock(shouldShowOverviewLoading: boolean): string {
+    if (!shouldShowOverviewLoading) {
+      return "";
+    }
+
+    return '<div class="system-overview-loading"><span class="system-overview-loading-dot" aria-hidden="true"></span><span>正在获取完整系统信息，请稍候...</span></div>';
+  }
+
+  private buildDiskBlocks(snapshot: SystemSnapshot, shouldShowOverviewLoading: boolean): string {
+    if (snapshot.disks.length === 0) {
+      return `<div class="card animate-fade-in col-span-3"><div class="text-sm text-text-secondary">${
+        shouldShowOverviewLoading ? "磁盘信息采集中..." : "未检测到磁盘分区信息"
+      }</div></div>`;
+    }
+
+    return snapshot.disks
+      .map((disk) => `
+        <div class="card animate-fade-in">
+          <div class="flex items-center justify-between mb-3">
+            <h4 class="font-semibold text-text-primary">磁盘 ${escapeHtml(disk.name)}</h4>
+            <span class="badge ${getBadgeClassByUsage(disk.usagePercent)}">${formatPercent(disk.usagePercent)}</span>
+          </div>
+          <div class="space-y-2 text-sm">
+            <div class="flex justify-between"><span class="text-text-secondary">挂载点</span><span class="text-text-primary">${escapeHtml(
+              disk.mountPoint
+            )}</span></div>
+            <div class="flex justify-between"><span class="text-text-secondary">总容量</span><span class="text-text-primary">${formatGb(
+              disk.totalGb
+            )}</span></div>
+            <div class="flex justify-between"><span class="text-text-secondary">已使用</span><span class="text-text-primary">${formatGb(
+              disk.usedGb
+            )}</span></div>
+            <div class="w-full bg-bg-tertiary rounded-full h-2 mt-2">
+              <div class="h-2 rounded-full ${getProgressColorClass(
+                disk.usagePercent
+              )}" style="width: ${Math.min(100, Math.max(0, disk.usagePercent))}%"></div>
+            </div>
+          </div>
+        </div>`)
+      .join("");
   }
 
   /**
@@ -326,8 +478,8 @@ export class SystemPage {
    * 磁盘数据回填：缓存已有磁盘数据但页面仍显示占位符时，局部更新磁盘区域
    */
   private tryPatchDiskSection(container: HTMLElement): void {
-    const disks = systemState.snapshotCache?.disks;
-    if (!disks || disks.length === 0) {
+    const snapshot = systemState.snapshotCache;
+    if (!snapshot) {
       return;
     }
 
@@ -336,39 +488,12 @@ export class SystemPage {
       return;
     }
 
-    // 已经渲染过真实磁盘卡片则跳过
-    if (diskGrid.children.length > 1 || !diskGrid.textContent?.includes("采集中")) {
+    const nextDiskHtml = this.buildDiskBlocks(snapshot, this.shouldShowOverviewLoading(snapshot));
+    if (diskGrid.innerHTML === nextDiskHtml) {
       return;
     }
 
-    // 更新磁盘指标卡片
-    const metricValues = container.querySelectorAll<HTMLElement>(".metric-card .metric-value");
-    const metricSubtitles = container.querySelectorAll<HTMLElement>(".metric-card .text-xs");
-    if (metricValues.length >= 3) {
-      metricValues[2].textContent = String(disks.length);
-    }
-    if (metricSubtitles.length >= 3) {
-      metricSubtitles[2].textContent = "已挂载";
-    }
-
-    // 更新磁盘详情网格
-    diskGrid.innerHTML = disks
-      .map((disk: any) => `
-        <div class="card animate-fade-in">
-          <div class="flex items-center justify-between mb-3">
-            <h4 class="font-semibold text-text-primary">磁盘 ${escapeHtml(disk.name)}</h4>
-            <span class="badge ${getBadgeClassByUsage(disk.usagePercent)}">${formatPercent(disk.usagePercent)}</span>
-          </div>
-          <div class="space-y-2 text-sm">
-            <div class="flex justify-between"><span class="text-text-secondary">挂载点</span><span class="text-text-primary">${escapeHtml(disk.mountPoint)}</span></div>
-            <div class="flex justify-between"><span class="text-text-secondary">总容量</span><span class="text-text-primary">${formatGb(disk.totalGb)}</span></div>
-            <div class="flex justify-between"><span class="text-text-secondary">已使用</span><span class="text-text-primary">${formatGb(disk.usedGb)}</span></div>
-            <div class="w-full bg-bg-tertiary rounded-full h-2 mt-2">
-              <div class="h-2 rounded-full ${getProgressColorClass(disk.usagePercent)}" style="width: ${Math.min(100, Math.max(0, disk.usagePercent))}%"></div>
-            </div>
-          </div>
-        </div>`)
-      .join("");
+    diskGrid.innerHTML = nextDiskHtml;
   }
 
   /**

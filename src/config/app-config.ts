@@ -29,11 +29,19 @@ export const marketMetaMap: Record<string, MarketMeta> = {
     type: "Language",
   },
   python: {
-    title: "Python 数据科学",
-    description: "Python 3.12 工具链，适配脚本、数据处理与 AI。",
-    tags: ["#ai", "#data"],
+    title: "Python 基础环境",
+    description: "Python 3.12 + pip，适配脚本、后端与数据处理。",
+    tags: ["#python", "#scripting"],
     hot: "8900",
     downloads: "2200万+",
+    type: "Language",
+  },
+  miniconda: {
+    title: "Python 数据科学",
+    description: "Miniconda + Conda 环境管理，适配数据科学与 AI。",
+    tags: ["#python", "#data"],
+    hot: "7600",
+    downloads: "1600万+",
     type: "Language",
   },
   go: {

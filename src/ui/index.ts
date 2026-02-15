@@ -3,6 +3,8 @@
  */
 
 export { getMetricCard } from "./metric-card";
+export { getDockerResourceChart, updateDockerResourceChart } from "./resource-chart/index";
+export type { ChartSortBy, ChartTopN } from "./resource-chart/index";
 export {
   getDockerEmptyState,
   getDockerLoadingState,

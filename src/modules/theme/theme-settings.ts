@@ -71,6 +71,21 @@ export function renderThemeSettingsPanel(): string {
       <div class="theme-grid" data-theme-grid>
         ${options}
       </div>
+
+      <div class="theme-info-section">
+        <div class="theme-info-header">
+          <svg class="theme-info-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span class="theme-info-title">主题说明</span>
+        </div>
+        <ul class="theme-info-list">
+          <li>主题切换统一在此页面完成，不再区分深色/浅色模式</li>
+          <li>内置 GitHub、Vercel、Linear、Arc、Notion、白昼简约 六套主题</li>
+          <li>字体已优化为中文友好字体栈，修复中文信息偶发乱码显示问题</li>
+          <li>命令执行统一后台静默，无额外 shell 弹窗</li>
+        </ul>
+      </div>
     </section>
   `;
 }

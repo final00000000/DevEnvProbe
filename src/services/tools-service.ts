@@ -4,12 +4,20 @@ import { toolsState } from "../state";
 import { TOOLS_CACHE_TTL_MS } from "../constants/config";
 import { npmPackageMap, marketMetaMap } from "../config/app-config";
 
-const TOOLS_REFRESH_RETRY_DELAY_MS = 240;
 const NPM_DOWNLOAD_TIMEOUT_MS = 2600;
+
+// 重试策略配置
+const RETRY_BASE_DELAY_MS = 300;  // 基础延迟 300ms
+const RETRY_MAX_DELAY_MS = 900;   // 最大延迟 900ms
+const RETRY_BACKOFF_FACTOR = 1.5; // 指数退避因子
+const RETRY_JITTER_PERCENT = 0.2; // 抖动比例 ±20%
+
+export type ErrorType = "transient" | "fatal";
 
 export interface RefreshCacheResult {
   ok: boolean;
   error: string | null;
+  errorType?: ErrorType;
   usedCache: boolean;
   retried: boolean;
 }
@@ -18,6 +26,8 @@ export interface RefreshCacheResult {
  * Tools 服务层 - 负责工具扫描和安装
  */
 export class ToolsService {
+  private inFlightRefreshPromise: Promise<RefreshCacheResult> | null = null;
+
   /**
    * 检查工具缓存是否过期
    */
@@ -38,16 +48,12 @@ export class ToolsService {
   }
 
   async refreshCacheDetailed(force: boolean): Promise<RefreshCacheResult> {
-    if (toolsState.refreshing) {
-      const hasCache = toolsState.dataCache.length > 0;
-      return {
-        ok: hasCache,
-        error: hasCache ? null : "探测任务进行中",
-        usedCache: hasCache,
-        retried: false,
-      };
+    // 如果已有进行中的请求,复用同一个 Promise (单飞模式)
+    if (this.inFlightRefreshPromise) {
+      return this.inFlightRefreshPromise;
     }
 
+    // 如果不强制刷新且缓存未过期,直接返回缓存
     if (!force && !this.isCacheStale() && toolsState.dataCache.length > 0) {
       return {
         ok: true,
@@ -57,62 +63,90 @@ export class ToolsService {
       };
     }
 
-    toolsState.refreshing = true;
-    toolsState.scanStartedAt = Date.now();
-    toolsState.scanSoftTimeoutActive = false;
+    // 创建新的探测 Promise 并缓存
+    this.inFlightRefreshPromise = (async (): Promise<RefreshCacheResult> => {
+      toolsState.refreshing = true;
+      toolsState.scanStartedAt = Date.now();
+      toolsState.scanSoftTimeoutActive = false;
 
-    try {
-      const firstAttempt = await this.detectToolsSnapshot();
-      if (firstAttempt.ok && firstAttempt.data) {
-        this.applyToolsSnapshot(firstAttempt.data, firstAttempt.elapsedMs);
-        this.resetRefreshErrorState();
+      try {
+        const firstAttempt = await this.detectToolsSnapshot();
+        if (firstAttempt.ok && firstAttempt.data) {
+          this.applyToolsSnapshot(firstAttempt.data, firstAttempt.elapsedMs);
+          this.resetRefreshErrorState();
+
+          return {
+            ok: true,
+            error: null,
+            usedCache: false,
+            retried: false,
+          };
+        }
+
+        // 使用指数退避计算重试延迟
+        const retryDelay = this.calculateRetryDelay(1);
+        await this.delay(retryDelay);
+
+        const secondAttempt = await this.detectToolsSnapshot();
+        if (secondAttempt.ok && secondAttempt.data) {
+          this.applyToolsSnapshot(secondAttempt.data, secondAttempt.elapsedMs);
+          this.resetRefreshErrorState();
+
+          return {
+            ok: true,
+            error: null,
+            usedCache: false,
+            retried: true,
+          };
+        }
+
+        const errorMessage = secondAttempt.error ?? firstAttempt.error ?? "探测失败，未返回有效数据";
+        const usedCache = toolsState.dataCache.length > 0;
+
+        toolsState.refreshFailCount += 1;
+        toolsState.lastRefreshError = errorMessage;
+        toolsState.lastRefreshErrorAt = Date.now();
 
         return {
-          ok: true,
-          error: null,
-          usedCache: false,
-          retried: false,
-        };
-      }
-
-      await this.delay(TOOLS_REFRESH_RETRY_DELAY_MS);
-
-      const secondAttempt = await this.detectToolsSnapshot();
-      if (secondAttempt.ok && secondAttempt.data) {
-        this.applyToolsSnapshot(secondAttempt.data, secondAttempt.elapsedMs);
-        this.resetRefreshErrorState();
-
-        return {
-          ok: true,
-          error: null,
-          usedCache: false,
+          ok: false,
+          error: errorMessage,
+          errorType: usedCache ? "transient" : "fatal",
+          usedCache,
           retried: true,
         };
+      } finally {
+        toolsState.refreshing = false;
+        toolsState.scanSoftTimeoutActive = false;
+        this.inFlightRefreshPromise = null;
       }
+    })();
 
-      const errorMessage = secondAttempt.error ?? firstAttempt.error ?? "探测失败，未返回有效数据";
-      const usedCache = toolsState.dataCache.length > 0;
-
-      toolsState.refreshFailCount += 1;
-      toolsState.lastRefreshError = errorMessage;
-      toolsState.lastRefreshErrorAt = Date.now();
-
-      return {
-        ok: usedCache,
-        error: errorMessage,
-        usedCache,
-        retried: true,
-      };
-    } finally {
-      toolsState.refreshing = false;
-      toolsState.scanSoftTimeoutActive = false;
-    }
+    return this.inFlightRefreshPromise;
   }
 
   private resetRefreshErrorState(): void {
     toolsState.refreshFailCount = 0;
     toolsState.lastRefreshError = null;
     toolsState.lastRefreshErrorAt = 0;
+  }
+
+  /**
+   * 计算重试延迟（指数退避 + 抖动）
+   * @param attemptNumber 重试次数 (1, 2, 3, ...)
+   * @returns 延迟时间（毫秒）
+   */
+  private calculateRetryDelay(attemptNumber: number): number {
+    // 指数退避: baseDelay * (backoffFactor ^ (attemptNumber - 1))
+    const exponentialDelay = RETRY_BASE_DELAY_MS * Math.pow(RETRY_BACKOFF_FACTOR, attemptNumber - 1);
+
+    // 限制最大延迟
+    const cappedDelay = Math.min(exponentialDelay, RETRY_MAX_DELAY_MS);
+
+    // 添加抖动 (±20%)，避免雷鸣群效应
+    const jitterRange = cappedDelay * RETRY_JITTER_PERCENT;
+    const jitter = jitterRange * (Math.random() * 2 - 1);
+
+    return Math.round(cappedDelay + jitter);
   }
 
   private async detectToolsSnapshot(): Promise<CommandResponse<ToolStatus[]>> {
@@ -174,10 +208,10 @@ export class ToolsService {
   /**
    * 安装工具
    */
-  async installTool(itemKey: string, installPath: string): Promise<CommandResponse<InstallResult>> {
+  async installTool(itemKey: string, installPath: string | null): Promise<CommandResponse<InstallResult>> {
     const response = await invoke<CommandResponse<InstallResult>>("install_market_item", {
       itemKey,
-      installPath: installPath.trim() || null,
+      installPath: installPath?.trim() || null,
     });
 
     return response;
@@ -195,15 +229,35 @@ export class ToolsService {
   }
 
   /**
-   * 选择安装目录
+   * 检查 winget 前置条件
    */
-  async pickInstallDirectory(): Promise<string | null> {
-    const response = await invoke<CommandResponse<string | null>>("pick_install_directory");
-    if (!response.ok || !response.data) {
-      return null;
+  async checkWingetPrerequisite(): Promise<CommandResponse<{ available: boolean; version: string | null; error: string | null }>> {
+    try {
+      return await invoke<CommandResponse<{ available: boolean; version: string | null; error: string | null }>>("check_winget_prerequisite");
+    } catch (error) {
+      return {
+        ok: false,
+        data: null,
+        error: `检查 winget 失败：${String(error)}`,
+        elapsedMs: 0,
+      };
     }
+  }
 
-    return response.data;
+  /**
+   * 自动安装 App Installer
+   */
+  async installAppInstaller(): Promise<CommandResponse<InstallResult>> {
+    try {
+      return await invoke<CommandResponse<InstallResult>>("install_app_installer_auto");
+    } catch (error) {
+      return {
+        ok: false,
+        data: null,
+        error: `安装 App Installer 失败：${String(error)}`,
+        elapsedMs: 0,
+      };
+    }
   }
 
   /**
@@ -231,6 +285,26 @@ export class ToolsService {
 
     const days = Math.floor(hours / 24);
     return `${days} 天前`;
+  }
+
+  /**
+   * 预加载工具检测（应用启动时调用）
+   * 在后台异步执行，不阻塞 UI，错误静默处理
+   */
+  async preloadDetection(): Promise<void> {
+    try {
+      // 如果已有缓存且未过期，跳过预加载
+      if (!this.isCacheStale() && toolsState.dataCache.length > 0) {
+        return;
+      }
+
+      // 后台异步刷新缓存，不等待结果
+      void this.refreshCache(false).catch(() => {
+        // 预加载失败静默处理，不影响应用启动
+      });
+    } catch {
+      // 预加载异常静默处理
+    }
   }
 
   /**

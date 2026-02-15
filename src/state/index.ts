@@ -7,6 +7,7 @@ export { systemState, SystemState } from "./system-state";
 export { toolsState, ToolsState } from "./tools-state";
 export { dockerState, DockerState } from "./docker-state";
 export { deployState, DeployState } from "./deploy-state";
+export { dockerVersionState, DockerVersionState } from "./docker-version-state";
 
 import type { PageKey } from "../types";
 

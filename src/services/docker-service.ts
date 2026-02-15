@@ -39,10 +39,7 @@ export class DockerService {
    * 获取概览需要执行的命令列表
    */
   getOverviewActions(mode: DockerOverviewMode): string[] {
-    const quickActions = ["version", "ps", "images", "compose_ls"];
-    if (dockerState.activeTab === "stats") {
-      quickActions.push("stats");
-    }
+    const quickActions = ["version", "ps", "images", "stats", "compose_ls"];
 
     if (mode === "quick") {
       return quickActions;

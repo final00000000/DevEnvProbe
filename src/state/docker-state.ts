@@ -62,6 +62,12 @@ export class DockerState {
   /** Docker 面板需要刷新标志 */
   panelNeedsRefresh = true;
 
+  /** 资源图表排序维度 */
+  chartSortBy: "cpu" | "mem" | "net" = "cpu";
+
+  /** 资源图表显示数量 */
+  chartTopN: 3 | 5 | 10 = 5;
+
   /**
    * 清除所有定时器
    */
